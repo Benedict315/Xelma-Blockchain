@@ -17,6 +17,7 @@ extern crate std;
 
 mod contract;
 mod errors;
+mod settlement;
 mod types;
 
 #[cfg(test)]
