@@ -87,6 +87,49 @@ Emitted when a user submits a Precision mode price prediction.
 
 ---
 
+### `("commit", "predict")`
+
+Emitted when a user locks a Precision stake behind a commitment hash.
+
+| Position | Field        | Type         | Description                                      |
+|----------|--------------|--------------|--------------------------------------------------|
+| 0        | `user`       | `Address`    | User who submitted the commitment                |
+| 1        | `round_id`   | `u64`        | Round the commitment belongs to                  |
+| 2        | `commitment` | `BytesN<32>` | SHA-256 commitment digest                        |
+| 3        | `amount`     | `i128`       | Locked stake in stroops                          |
+
+---
+
+### `("reveal", "predict")`
+
+Emitted after a commitment is successfully opened during the reveal window.
+The salt is intentionally omitted from the event payload.
+
+| Position | Field             | Type      | Description                                      |
+|----------|-------------------|-----------|--------------------------------------------------|
+| 0        | `user`            | `Address` | User who revealed the commitment                 |
+| 1        | `round_id`        | `u64`     | Round the revealed prediction belongs to         |
+| 2        | `predicted_price` | `u128`    | Revealed price (4 decimal places)                 |
+| 3        | `amount`          | `i128`    | Locked stake in stroops                          |
+
+---
+
+### `("forfeit", "predict")`
+
+Emitted at competitive Precision settlement for each commitment that was not
+revealed. The stake remains in the pot and can only be paid to eligible,
+revealed winners. It is not emitted when nobody reveals and all stakes are
+refunded, or on cancellation/fallback refund paths.
+
+| Position | Field      | Type      | Description                                      |
+|----------|------------|-----------|--------------------------------------------------|
+| 0        | `user`     | `Address` | User whose unrevealed commitment was forfeited   |
+| 1        | `round_id` | `u64`     | Round settled                                    |
+| 2        | `amount`   | `i128`    | Forfeited stake in stroops                       |
+
+---
+
+### `("round", "summary")`
 ### `("round", "resolved")`
 
 Emitted when a round is settled competitively by the oracle.
@@ -96,6 +139,92 @@ Emitted when a round is settled competitively by the oracle.
 | 0        | `round_id`    | `u64`  | Round that was resolved                          |
 | 1        | `final_price` | `u128` | Closing price reported by the oracle (4 dec.)    |
 | 2        | `mode`        | `u32`  | Round mode: `0` = UpDown, `1` = Precision        |
+| 3        | `protocol_fee_bps` | `Option<u32>` | Active protocol fee in basis points (if set)     |
+| 4        | `precision_payout_policy` | `u32` | Payout distribution policy used for Precision round: `0` = Equal, `1` = StakeWeighted |
+
+---
+
+Emitted exactly once per terminal round transition — competitive resolution,
+admin cancellation, or min-participants fallback. Replaces the previously
+separate `("round", "resolved")`, `("round", "cancelled")`, and
+`("round", "fallback")` events.
+
+This is the **canonical terminal round event**. Indexers should listen for
+`("round", "summary")` and ignore legacy topic names.
+
+The payload carries the full terminal state of the round:
+
+| Position | Field               | Type         | Description                                                                 |
+|----------|---------------------|--------------|-----------------------------------------------------------------------------|
+| 0        | `version`           | `u32`        | Schema version tag (`0` for this layout). Reserved for future field changes. |
+| 1        | `round_id`          | `u64`        | Monotonically increasing round identifier                                   |
+| 2        | `status`            | `u32`        | Terminal status: `0` = Resolved, `1` = Cancelled, `2` = FallbackRefund, `3` = Voided |
+| 3        | `mode`              | `u32`        | Round mode: `0` = UpDown, `1` = Precision                                   |
+| 4        | `price_start`       | `u128`       | Opening price at round start (4 decimal places)                             |
+| 5        | `price_final`       | `u128`       | Settlement price from oracle, or `0` for cancelled/fallback rounds           |
+| 6        | `pool_up`           | `i128`       | Total Up-side pool at terminal time (stroops)                                |
+| 7        | `pool_down`         | `i128`       | Total Down-side pool at terminal time (stroops)                              |
+| 8        | `participant_count` | `u32`        | Total unique user participants                                               |
+| 9        | `total_pot`         | `i128`       | Total accumulated round pot (stroops)                                        |
+| 10       | `fee_amount`        | `i128`       | Protocol fees collected (stroops), `0` for non-competitive paths             |
+| 11       | `settled_at_ledger` | `u32`        | Ledger sequence number when the round was archived                           |
+| 12       | `confidence`        | `Option<u32>` | Oracle confidence in basis points (`None` for cancel / fallback; staged value for void) |
+
+For dispute-enabled rounds, competitive settlement is staged before this
+terminal summary is emitted. The archive status additionally uses `3` =
+`Voided` when the permissionless refund path is selected.
+
+### `("round", "pending")`
+
+Emitted after a valid oracle result is staged and all payouts and protocol fees
+are deferred for the configured dispute window.
+
+| Position | Field                | Type   | Description                                      |
+|----------|----------------------|--------|--------------------------------------------------|
+| 0        | `round_id`           | `u64`  | Round awaiting a terminal dispute decision       |
+| 1        | `final_price`        | `u128` | Validated oracle settlement price                 |
+| 2        | `resolved_at_ledger` | `u32`  | Ledger where the oracle result was staged         |
+| 3        | `deadline_ledger`    | `u32`  | First ledger where finalization is permitted      |
+
+### `("round", "voided")`
+
+Emitted when any caller voids a staged round strictly before its deadline. Each
+participant is credited exactly their recorded stake and the protocol fee is
+zero.
+
+| Position | Field               | Type   | Description                              |
+|----------|---------------------|--------|------------------------------------------|
+| 0        | `round_id`          | `u64`  | Voided round                             |
+| 1        | `participant_count` | `u32`  | Number of refunded participants          |
+| 2        | `total_refund`      | `i128` | Sum of full-stake refunds in stroops      |
+
+### `("round", "finalized")`
+
+Emitted when any caller finalizes a staged round at or after its frozen
+deadline. The standard settlement and fee policy has completed before emission.
+
+| Position | Field               | Type   | Description                              |
+|----------|---------------------|--------|------------------------------------------|
+| 0        | `round_id`          | `u64`  | Finalized round                          |
+| 1        | `final_price`       | `u128` | Staged oracle settlement price           |
+| 2        | `participant_count` | `u32`  | Number of settled participants           |
+| 3        | `fee_amount`        | `i128` | Protocol fee collected in stroops        |
+
+Emitted once per participant during round resolution after that participant's settlement
+outcome is known. Indexers can use these events to reconstruct the complete participant-level
+result of a round without replaying contract storage reads.
+
+| Position | Field          | Type      | Description                                               |
+|----------|----------------|-----------|-----------------------------------------------------------|
+| 0        | `round_id`     | `u64`     | Round that produced the participant outcome               |
+| 1        | `mode`         | `u32`     | Round mode: `0` = UpDown, `1` = Precision                 |
+| 2        | `user`         | `Address` | Participant address                                       |
+| 3        | `gross_payout` | `i128`    | Amount credited to pending winnings, in stroops           |
+| 4        | `outcome_type` | `u32`     | `0` = win, `1` = loss, `2` = refund, `3` = void           |
+
+`gross_payout` is `0` for losses. For refunds, it equals the participant's refunded stake.
+For wins, it equals the full pending payout credited by the resolver, including returned
+stake and any profit share.
 
 ---
 
@@ -107,7 +236,7 @@ at the top of this file).*
 
 Emitted per losing participant whenever a round settles competitively
 (Issue #168).  Complements the implicit "winner" signal from pending-winnings
-accumulation and the explicit `("round", "fallback")` refund event so that
+accumulation so that
 analytics, user notifications, and indexers can detect losses without
 inferring them from the absence of payout events.
 
@@ -123,8 +252,12 @@ metadata field is meaningful:
 
 Emitted for every participant who placed a bet/prediction and was on the
 losing side of a competitive settlement. **Not** emitted for refund paths
-(price-unchanged, one-sided pool, min-participants fallback, or admin
-cancellation) — those cases use their respective refund events instead.
+(price-unchanged, one-sided pool, min-participants fallback, admin
+cancellation, or Precision rounds where **nobody revealed** and all
+commitments are refunded) — those cases use their respective refund
+outcomes instead. When ≥1 Precision prediction is revealed, unrevealed
+commitments forfeit to the pot and **do** emit this loss event
+(`predicted_price = 0`).
 
 | Position | Field            | Type      | Description                                                              |
 |----------|------------------|-----------|--------------------------------------------------------------------------|
@@ -163,6 +296,43 @@ All stakes are refunded; no competitive settlement occurs.
 
 ---
 
+### `("pool", "onesided")`
+
+Emitted when a prediction round settles as a one-sided (degenerate) market (Issue #270).
+Triggered when bets/predictions were placed on only one side (e.g., UP only or DOWN only).
+Applies the configured deterministic settlement policy (`OneSidedPolicy::Refund` default).
+
+| Position | Field            | Type   | Description                                                              |
+|----------|------------------|--------|--------------------------------------------------------------------------|
+| 0        | `round_id`       | `u64`  | Round that was settled as one-sided                                      |
+| 1        | `policy_code`    | `u32`  | Policy applied: `0` = Refund, `1` = Void, `2` = CarryForward              |
+| 2        | `affected_side`  | `u32`  | Side containing positions: `0` = Up, `1` = Down, `2` = Empty             |
+| 3        | `refund_amount`  | `i128` | Total stake amount refunded across all participants (in stroops)         |
+| 4        | `carry_amount`   | `i128` | Total stake amount carried forward to next round (in stroops)            |
+| 5        | `pool_up`        | `i128` | Total Up-side pool at settlement time (in stroops)                       |
+| 6        | `pool_down`      | `i128` | Total Down-side pool at settlement time (in stroops)                     |
+
+---
+
+### `("round", "summary")`
+
+Emitted when a round is resolved, cancelled, or refunded. Contains compact settlement data.
+
+| Position | Field               | Type   | Description                                                           |
+|----------|---------------------|--------|-----------------------------------------------------------------------|
+| 0        | `round_id`          | `u64`  | Round identifier                                                      |
+| 1        | `mode`              | `u32`  | Round mode: `0` = UpDown, `1` = Precision                             |
+| 2        | `price_start`       | `u128` | Opening price at round start (4 dec.)                                 |
+| 3        | `price_final`       | `u128` | Settlement price (or `0` for administrative cancellation) (4 dec.)    |
+| 4        | `participant_count` | `u32`  | Total unique user participants in the round                           |
+| 5        | `total_pot`         | `i128` | Total accumulated round pot (in stroops)                              |
+| 6        | `fee_amount`        | `i128` | Total protocol fees collected from the round pot (in stroops)         |
+| 7        | `status`            | `u32`  | Round status: `0` = Resolved, `1` = Cancelled, `2` = FallbackRefund   |
+| 8        | `fee_model`         | `u32`  | Fee incidence model: `0` = FeeOnPot, `1` = FeeOnWinnings (Issue #268) |
+
+---
+
+
 ### `("claim", "winnings")`
 
 Emitted when a user successfully claims pending winnings.
@@ -198,7 +368,7 @@ Emitted for every admin configuration mutation when a value is actually written,
 
 Example payload for a windows update: `(Windows, Windows(6, 12), Windows(10, 20))`.
 
-`ConfigChangeKind` values currently include `Windows`, `MaxStake`, `MaxUserRoundExposure`, `MaxPendingWinnings`, `OracleStaleThreshold`, `OracleMaxDeviationBps`, `ProtocolFeeBps`, `MinParticipants`, `MaxPrecisionParticipants`, `MintLimit`, and `ArchiveRetention`.
+`ConfigChangeKind` values currently include `Windows`, `MaxStake`, `MaxUserRoundExposure`, `MaxPendingWinnings`, `OracleStaleThreshold`, `OracleMaxDeviationBps`, `ProtocolFeeBps`, `MinParticipants`, `MaxPrecisionParticipants`, `MintLimit`, `ArchiveRetention`, `CloseBufferLedgers`, and `OracleQuorum`.
 
 ---
 
@@ -213,7 +383,81 @@ Emitted when the admin reconfigures the bet and run window lengths.
 
 ---
 
-### `("oracle", "heartbeat")`
+#### `("action", "rejct")` — Diagnostic rejected-action event (Issue #196)
+
+Emitted when a privileged action (admin or oracle) is rejected due to an
+auth failure, paused contract, invalid state, or validation error. Enables
+operators to diagnose failed privileged transactions from on-chain events
+without relying on off-chain error logs.
+
+**Privacy**: the payload contains only the `actor` Address, an `action`
+Symbol, and a numeric `reason` code (a `ContractError` variant). No
+personally identifiable information, financial amounts, or internal state
+is exposed. Operators can match reason codes against the `ContractError`
+enum variants in `contracts/src/errors.rs`.
+
+| Position | Field    | Type      | Description                                                        |
+|----------|----------|-----------|--------------------------------------------------------------------|
+| 0        | `actor`  | `Address` | Address of the authenticated caller whose action was rejected       |
+| 1        | `action` | `Symbol`  | Short name of the privileged action (e.g. `"create"`, `"resolve"`) |
+| 2        | `reason` | `u32`     | Numeric error code matching a `ContractError` variant               |
+
+**Example action symbols**: `"create"`, `"resolve"`, `"cancel"`, `"migrate"`,
+`"withdraw"`, `"hbeat"`, `"arm_ovr"`, `"set_arch"`, `"sched"`,
+`"cncl_cfg"`, `"min_par"`, `"max_prec"`, `"mint_lim"`.
+
+**Reason codes** are the integer values of `ContractError` — see
+`contracts/src/errors.rs`.
+
+---
+
+---
+
+## `("oracle", "multisum")` — Multi-feed settlement summary (Issue #262)
+
+Emitted when `resolve_round_multi` successfully computes the median price and
+passes quorum. Provides a compact summary of the multi-feed resolution before
+round settlement proceeds.
+
+| Position | Field               | Type   | Description                                               |
+|----------|---------------------|--------|-----------------------------------------------------------|
+| 0        | `round_id`          | `u64`  | Round that was resolved                                   |
+| 1        | `observation_count` | `u32`  | Total number of feed observations in the payload           |
+| 2        | `survivor_count`    | `u32`  | Observations that passed outlier rejection                |
+| 3        | `median_price`      | `u128` | Computed median settlement price (4 decimal places)       |
+| 4        | `quorum_threshold`  | `u32`  | Configured quorum threshold that was satisfied            |
+
+---
+
+## `("oracle", "nofed")` — Multi-feed quorum failure (Issue #262)
+
+Emitted when `resolve_round_multi` fails because too few observations survived
+outlier rejection to meet the configured quorum threshold.
+
+| Position | Field               | Type   | Description                                               |
+|----------|---------------------|--------|-----------------------------------------------------------|
+| 0        | `round_id`          | `u64`  | Round that failed settlement                              |
+| 1        | `median_price`      | `u128` | Computed median price (4 decimal places)                  |
+| 2        | `survivor_count`    | `u32`  | Observations that passed outlier rejection                |
+| 3        | `quorum_threshold`  | `u32`  | Configured quorum threshold that was NOT met              |
+
+---
+
+## `("oracle", "quorum")` — Quorum config updated (Issue #262)
+
+Emitted when the admin sets or clears the multi-feed oracle quorum
+configuration. Emitted both via the direct setter and via timelocked config
+application.
+
+| Position | Field                  | Type   | Description                                               |
+|----------|------------------------|--------|-----------------------------------------------------------|
+| 0        | `min_observations`     | `u32`  | Minimum observations per multi-feed payload (0 if cleared)|
+| 1        | `quorum_threshold`     | `u32`  | Minimum surviving observations for quorum (0 if cleared)  |
+| 2        | `outlier_threshold_bps`| `u32`  | Max deviation from median before outlier rejection        |
+
+---
+
+## `("oracle", "heartbeat")`
 
 Emitted when the oracle records an on-chain liveness heartbeat.
 
@@ -221,6 +465,75 @@ Emitted when the oracle records an on-chain liveness heartbeat.
 |----------|-------------|-------|--------------------------------------------------------------|
 | 0        | `timestamp` | `u64` | Unix epoch seconds when the heartbeat was recorded on-chain  |
 | 1        | `status`    | `u32` | Oracle status: `0` = active, `1` = degraded, `2` = offline  |
+
+---
+
+## Oracle rotation events (two-step with mandatory delay)
+
+Oracle rotation uses a two-step flow with a **mandatory 1-hour delay**
+(`MIN_ROTATION_DELAY_SECONDS = 3_600`) between proposal and acceptance.
+This prevents quiet takeovers — even with admin key compromise, operators
+have a full hour to observe the proposal and react.
+
+### `("oracle", "propose")`
+
+Emitted when the admin proposes a new oracle address with an expiry window.
+
+| Position | Field         | Type      | Description                                            |
+|----------|---------------|-----------|--------------------------------------------------------|
+| 0        | `new_oracle`  | `Address` | Proposed new oracle address                            |
+| 1        | `expires_at`  | `u64`     | Unix timestamp when the proposal expires               |
+
+### `("oracle", "accept")`
+
+Emitted when a pending rotation proposal is successfully accepted (after the
+mandatory delay has elapsed and before expiry).
+
+| Position | Field             | Type      | Description                               |
+|----------|-------------------|-----------|-------------------------------------------|
+| 0        | `previous_oracle` | `Address` | Oracle address before the rotation         |
+| 1        | `new_oracle`      | `Address` | New oracle address after the rotation      |
+
+### `("oracle", "cancel")`
+
+Emitted when the admin cancels a pending rotation proposal.
+
+| Position | Field         | Type      | Description                                      |
+|----------|---------------|-----------|--------------------------------------------------|
+| 0        | `new_oracle`  | `Address` | The proposed oracle address that was cancelled    |
+
+### `("oracle", "expired")`
+
+Emitted when an expired proposal is cleaned up (auto-clean in
+`get_oracle_rotation_proposal` or during `accept_oracle_rotation`).
+
+| Position | Field         | Type  | Description                                      |
+|----------|---------------|-------|--------------------------------------------------|
+| 0        | `new_oracle`  | `Address` | The proposed oracle address that expired       |
+| 1        | `proposed_at` | `u64` | Unix timestamp when the proposal was created      |
+| 2        | `expires_at`  | `u64` | Unix timestamp when the proposal expired          |
+
+### `("oracle", "early")`
+
+Emitted when an attempt to accept a rotation proposal is rejected because the
+mandatory delay (`MIN_ROTATION_DELAY_SECONDS`) has not yet elapsed.
+
+| Position | Field           | Type  | Description                                          |
+|----------|-----------------|-------|------------------------------------------------------|
+| 0        | `new_oracle`    | `Address` | The proposed oracle address                       |
+| 1        | `current_ts`    | `u64` | Current ledger timestamp at rejection time            |
+| 2        | `earliest_accept` | `u64` | Timestamp at which acceptance will be allowed       |
+
+---
+
+### `("mode", "transition")`
+
+Emitted when the contract's emergency runtime mode is changed by the admin.
+
+| Position | Field      | Type  | Description                                                         |
+|----------|------------|-------|---------------------------------------------------------------------|
+| 0        | `old_mode` | `u32` | Previous runtime mode: `0` = Normal, `1` = ClaimsOnly, `2` = Paused |
+| 1        | `new_mode` | `u32` | New runtime mode: `0` = Normal, `1` = ClaimsOnly, `2` = Paused      |
 
 ---
 
@@ -266,27 +579,28 @@ use soroban_sdk::{symbol_short, testutils::{Events, TryIntoVal}, Env};
 let events = env.events().all();
 let resolved = events.iter().find(|(_, topics, _)| {
     topics.get(0).and_then(|t| t.try_into_val(&env).ok()) == Some(symbol_short!("round"))
-        && topics.get(1).and_then(|t| t.try_into_val(&env).ok()) == Some(symbol_short!("resolved"))
+        && topics.get(1).and_then(|t| t.try_into_val(&env).ok()) == Some(symbol_short!("summary"))
 });
 ```
 
 ---
 
-## `("protocol", "fee_collected")` — Competitive-settlement fee accrual
+## `("protocol", "fee_coll")` — Competitive-settlement fee accrual
 
 Emitted by every competitive-settlement path (UpDown indexed/legacy, Precision
 indexed/legacy) when the protocol fee is enabled (Issue #162). NOT emitted on
 refund / cancel / fallback paths — those return users' full stake and the
 treasury stays flat.
 
-| Field         | Type      | Description                                                |
-|---------------|-----------|------------------------------------------------------------|
-| `round_id`    | `u64`     | The id of the settled round.                                |
-| `fee_amount`  | `i128`    | Stroops routed to the on-chain treasury this round.         |
-| `treasury_balance` | `i128` | Cumulative treasury balance AFTER this round's credit.     |
-| `bps_active`  | `u32`     | The fee's bps that produced `fee_amount` (echoes storage).  |
+| Field              | Type          | Description                                                          |
+|--------------------|---------------|----------------------------------------------------------------------|
+| `round_id`         | `u64`         | The id of the settled round.                                          |
+| `fee_amount`       | `i128`        | Stroops routed to the on-chain treasury this round.                   |
+| `treasury_balance` | `i128`        | Cumulative treasury balance AFTER this round's credit.                |
+| `bps_active`       | `u32`         | The fee's bps that produced `fee_amount` (echoes storage).            |
+| `fee_model`        | `u32`         | Fee incidence model: `0` = FeeOnPot, `1` = FeeOnWinnings (Issue #268).|
 
-**Topics**: `("protocol", "fee_collected")`
+**Topics**: `("protocol", "fee_coll")`
 **Source contracts**: `VirtualTokenContract`
 **Emitted by**: `_record_winnings_indexed`, `_record_winnings_legacy`,
 `_resolve_precision_mode`, `_resolve_precision_legacy`.
@@ -294,9 +608,14 @@ treasury stays flat.
 The conservation invariant
 `Σ payout_i + fee_amount == total_pot` holds for every emission. In the
 UpDown pathological case `fee > losing_pool` (very thin losing-side
-liquidity near the bps cap) the spillover is deducted from `winning_pool`
-so the invariant still holds and winners receive only their residual
-principal — documented inline in `_apply_protocol_fee_updown`.
+liquidity near the bps cap, FeeOnPot model only) the spillover is deducted
+from `winning_pool` so the invariant still holds and winners receive only
+their residual principal — documented inline in `_apply_protocol_fee_updown`.
+
+Under `FeeOnWinnings` (Issue #268) the fee is calculated only on the net
+profit (losing_pool in UpDown; pot - winner_stakes in Precision), so
+winners always retain their full principal and the spillover guard is never
+triggered.
 
 ---
 
@@ -331,6 +650,196 @@ refunds, so no new authorization surface is added.
 **Topics**: `("protocol", "fee_withdrawn")`
 **Source contracts**: `VirtualTokenContract`
 **Emitted by**: `withdraw_protocol_fee`.
+
+---
+
+## `("template", "set")` — Round template stored
+
+Emitted when the admin stores or overwrites the round-creation blueprint
+used by `create_next_from_template`.
+
+| Field         | Type          | Description                                    |
+|---------------|---------------|-------------------------------------------------|
+| `start_price` | `u128`        | Starting price the next round will use.         |
+| `mode`        | `u32`         | Round mode: `0` = UpDown, `1` = Precision.       |
+
+**Topics**: `("template", "set")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `set_round_template`.
+
+---
+
+## `("template", "cleared")` — Round template removed
+
+Emitted when the admin clears the configured round template.
+
+| Field     | Type  | Description                                  |
+|-----------|-------|-----------------------------------------------|
+| `ledger`  | `u32` | Ledger sequence number at which it was cleared.|
+
+**Topics**: `("template", "cleared")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `clear_round_template`.
+
+---
+
+## `("template", "applied")` — Next round created from template
+
+Emitted when `create_next_from_template` successfully creates a round from
+the stored blueprint. Always accompanied by a `("round", "created")` event
+from the underlying `create_round` call.
+
+| Field         | Type   | Description                                   |
+|---------------|--------|------------------------------------------------|
+| `round_id`    | `u64`  | Id of the newly created round.                  |
+| `start_price` | `u128` | Starting price used (from the template).        |
+| `mode`        | `u32`  | Round mode used: `0` = UpDown, `1` = Precision. |
+
+**Topics**: `("template", "applied")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `create_next_from_template`.
+
+---
+
+## `("season", "reset")` — Leaderboard season archived and advanced
+
+Emitted when the admin resets the active leaderboard season. The ending
+season's bounded rankings are frozen into a permanent `SeasonArchive` before
+the season id advances; per-user season stats (`SeasonUserStats`) for the
+ended season are never deleted and remain independently queryable.
+
+| Field               | Type  | Description                                          |
+|---------------------|-------|-------------------------------------------------------|
+| `season_id`         | `u32` | Id of the season that was just archived.               |
+| `new_season_id`     | `u32` | Id of the newly-active season (`season_id + 1`).        |
+| `ended_at_ledger`    | `u32` | Ledger sequence number at which the season ended.       |
+| `participant_count` | `u32` | Distinct addresses present in the archived rankings.    |
+
+**Topics**: `("season", "reset")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `reset_leaderboard_season`.
+**Golden test**: `tests::event_order_golden::golden_season_reset_*`.
+
+---
+
+## Governance events (dual approval, Issue #272)
+
+All governance events use topic0 `"gov"`. Payload fields are positional and
+pinned by `tests::event_order_golden` (Issue #568): adding, removing or
+reordering a field is a breaking change for indexers.
+
+`action_code` values: `0` PauseProtocol, `1` UnpauseProtocol,
+`2` SetProtocolFeeBps, `3` WithdrawProtocolFee, `4` SetTreasuryAddress,
+`5` SetAdmin, `6` SetOracle, `7` WithdrawInsuranceFund,
+`8` SetInsuranceSplitBps, `9` SetInsuranceCoverageBps.
+
+### `("gov", "appr_set")` — Secondary approver configured
+
+| Position | Field      | Type      |
+|----------|------------|-----------|
+| 0        | `admin`    | `Address` |
+| 1        | `approver` | `Address` |
+
+**Emitted by**: `set_gov_approver`.
+
+### `("gov", "proposed")` — Proposal created
+
+| Position | Field               | Type      | Description                                                   |
+|----------|---------------------|-----------|---------------------------------------------------------------|
+| 0        | `proposal_id`       | `u64`     | Monotonic id (starts at 1).                                   |
+| 1        | `proposer`          | `Address` | Admin or approver who proposed.                               |
+| 2        | `action_code`       | `u32`     | See table above.                                              |
+| 3        | `expires_at_ledger` | `u32`     | `created_at_ledger + ttl`; `ttl` is `custom_ttl` or `get_gov_proposal_ttl()`. |
+
+**Emitted by**: `propose_gov_action`.
+
+### `("gov", "approved")` — Proposal approved
+
+| Position | Field         | Type      |
+|----------|---------------|-----------|
+| 0        | `proposal_id` | `u64`     |
+| 1        | `approver`    | `Address` |
+
+**Emitted by**: `approve_gov_proposal`.
+
+### `("gov", "executed")` — Proposal executed
+
+| Position | Field         | Type      |
+|----------|---------------|-----------|
+| 0        | `proposal_id` | `u64`     |
+| 1        | `executor`    | `Address` |
+| 2        | `action_code` | `u32`     |
+
+Always the **last** event of `execute_gov_proposal`. Side-effect events of the
+action are emitted first, in the same invocation; e.g. `PauseProtocol` /
+`UnpauseProtocol` emit `("mode", "transition")` immediately before `executed`.
+
+### `("gov", "cancel")` — Proposal cancelled
+
+| Position | Field         | Type      |
+|----------|---------------|-----------|
+| 0        | `proposal_id` | `u64`     |
+| 1        | `canceller`   | `Address` |
+
+**Emitted by**: `cancel_gov_proposal` (from `Pending`, `Approved` or `Expired`).
+
+### `("gov", "expired")` — Proposal found expired
+
+| Position | Field            | Type  |
+|----------|------------------|-------|
+| 0        | `proposal_id`    | `u64` |
+| 1        | `current_ledger` | `u32` |
+
+Published by `approve_gov_proposal` / `execute_gov_proposal` right before they
+return `ProposalExpired`. Because the call fails, the host rolls the event
+back, so **it never reaches the ledger** today. Indexers should derive expiry
+from `expires_at_ledger` in `("gov", "proposed")` instead.
+
+---
+
+## `("storage", "touch")` — Batch TTL extension
+
+| Position | Field     | Type  | Description                                                   |
+|----------|-----------|-------|---------------------------------------------------------------|
+| 0        | `touched` | `u32` | Allowlisted keys that existed and had their TTL extended.     |
+| 1        | `skipped` | `u32` | Allowlisted keys that were absent from storage (no-op).       |
+
+Emitted once per successful call, including an empty batch (`(0, 0)`).
+A non-allowlisted key aborts the call, so no `touch` event is emitted.
+
+**Emitted by**: `batch_touch_ttl`.
+**Golden test**: `tests::event_order_golden::golden_storage_touch_*`.
+
+---
+
+## `("oracle", "hblocked")` — Heartbeat health gate blocked settlement
+
+Emitted when `resolve_round` is blocked by the heartbeat health gate in strict mode
+(Issue #264). The round remains active; the oracle or admin must address the heartbeat
+state before retrying.
+
+| Position | Field       | Type   | Description                                    |
+|----------|-------------|--------|------------------------------------------------|
+| 0        | `round_id`  | `u64`  | Round id that was blocked from settlement       |
+
+**Topics**: `("oracle", "hblocked")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `resolve_round` (heartbeat health gate, strict mode).
+
+---
+
+## `("oracle", "hoverride")` — Heartbeat health gate override consumed
+
+Emitted when the admin-armed heartbeat health override is consumed during
+`resolve_round`, allowing settlement to proceed past the gate (Issue #264).
+
+| Position | Field       | Type   | Description                                    |
+|----------|-------------|--------|------------------------------------------------|
+| 0        | `round_id`  | `u64`  | Round id for which the override was consumed    |
+
+**Topics**: `("oracle", "hoverride")`
+**Source contracts**: `VirtualTokenContract`
+**Emitted by**: `resolve_round` (heartbeat health gate override path).
 
 ---
 

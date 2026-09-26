@@ -15,7 +15,7 @@
 #
 # Optional:
 #   CONTRACT_WASM_PATH           Path to the compiled WASM file
-#                                (default: target/wasm32-unknown-unknown/release/xelma_contract.wasm)
+#                                (default: target/wasm32v1-none/release/xelma_contract.wasm)
 #
 
 set -euo pipefail
@@ -40,7 +40,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-WASM_PATH="${CONTRACT_WASM_PATH:-"$REPO_ROOT/target/wasm32-unknown-unknown/release/xelma_contract.wasm"}"
+WASM_PATH="${CONTRACT_WASM_PATH:-"$REPO_ROOT/target/wasm32v1-none/release/xelma_contract.wasm"}"
 
 echo "============================================"
 if $DRY_RUN; then
@@ -53,10 +53,18 @@ echo ""
 
 # ── Build WASM ──────────────────────────────────────────────────────
 echo "[1/5] Building contract WASM …"
-cargo build \
-  --target wasm32-unknown-unknown \
+# `wasm32-unknown-unknown` on current Rust toolchains defaults to enabling
+# wasm `reference-types`, which the Soroban host rejects at deploy time.
+# `wasm32v1-none` targets the WASM MVP feature baseline Soroban supports.
+# `cargo rustc --crate-type=cdylib` (rather than `cargo build`, which also
+# builds the `rlib` crate-type declared in Cargo.toml) is required to match
+# the lean output `stellar contract build` produces — building both
+# crate-types in one pass roughly doubles the deployed WASM's size.
+cargo rustc \
+  --manifest-path=contracts/Cargo.toml \
+  --crate-type=cdylib \
+  --target=wasm32v1-none \
   --release \
-  --package xelma-contract \
   --locked \
   2>&1
 
@@ -250,4 +258,6 @@ echo "    2. Configure round windows with set_windows()"
 echo "    3. Verify contract state with get_admin() and get_oracle()"
 echo "    4. Publish contract ID to consumers (frontend, indexer)"
 echo "    5. Register oracle heartbeat"
+echo ""
+echo "  For post-deployment procedures and incident response playbook, see docs/DEPLOYMENT_RUNBOOK.md."
 echo ""

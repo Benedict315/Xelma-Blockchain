@@ -130,7 +130,7 @@ Unlike traditional prediction markets, Xelma is:
 - **Canonical crate**: `xelma-contract` (used by CI, build, and artifact paths)
 
 ### Key Features:
-- ✅ Custom error handling (20 error types)
+- ✅ Custom error handling (50 error types)
 - ✅ Emergency pause/recovery controls for incident response
 - ✅ Overflow protection (checked arithmetic)
 - ✅ Role-based access control (Admin, Oracle, User)
@@ -158,6 +158,16 @@ This ensures:
 - ✅ **Zero dust loss** - Every stroops is accounted for
 - ✅ **Simple & predictable** - First predictor gets the remainder
 - ✅ **Fair distribution** - Close to equal split, minimal advantage
+
+### Precision Commit-Reveal Flow
+
+To prevent front-running and copy-trading, Precision rounds support a two-step commit-reveal flow:
+1. **Commit**: Users submit a SHA-256 hash of their `predicted_price` and a `salt`. This locks their stake without revealing the guess. The commitment hash must be valid (not all-zeros).
+2. **Reveal**: During the reveal window, users submit the plaintext `predicted_price` and `salt`. The contract verifies the hash and enforces minimum salt entropy (to prevent trivial grinding).
+
+**Unrevealed Policy**:
+- **Anti-Griefing**: If at least one prediction is revealed (or placed directly), any unrevealed commitments are forfeited to the pot and count as losers.
+- **Conservation**: If *nobody* reveals in the round, all committed stakes are fully refunded to the users.
 
 ### Oracle Operator Runbook
 
@@ -221,7 +231,10 @@ Xelma-Blockchain/
 │   │       ├── property_invariants.rs
 │   │       ├── resolution.rs
 │   │       ├── security.rs
+│   │       ├── storage_benchmarks.rs
+│   │       ├── ttl_tests.rs
 │   │       └── windows.rs
+│   │       └── ... (20+ test files total — see docs/CONTRIBUTOR_MAP.md)
 │   ├── Cargo.toml            # Rust dependencies
 │   └── test_snapshots/       # Test execution records
 │
@@ -233,12 +246,15 @@ Xelma-Blockchain/
 │   └── README.md              # Bindings usage guide
 │
 ├── target/                    # Build artifacts
-│   └── wasm32-unknown-unknown/
+│   └── wasm32v1-none/
 │       └── release/
 │           └── xelma_contract.wasm  # Compiled contract
 │
 ├── docs/
-│   └── EVENT_SCHEMA.md        # Canonical on-chain event schema for indexers
+│   ├── CONTRIBUTOR_MAP.md     # Module → test → task map for contributors
+│   ├── CONTRIBUTOR_TASK_MATRIX.md # PR evidence requirements by task type
+│   ├── EVENT_SCHEMA.md        # Canonical on-chain event schema for indexers
+│   └── storage_lifecycle.md   # TTL/rent policy reference
 ├── SECURITY_REVIEW.md         # Comprehensive security audit
 ├── Cargo.toml                 # Workspace configuration
 └── README.md                  # This file
@@ -265,7 +281,7 @@ cd Xelma-Blockchain
 
 ```bash
 cd contracts
-cargo build --target wasm32-unknown-unknown --release
+stellar contract build
 ```
 
 ### 3. Run Tests
@@ -280,7 +296,7 @@ cargo test --workspace --locked
 ```bash
 cd ../../
 stellar contract bindings typescript \
-  --wasm target/wasm32-unknown-unknown/release/xelma_contract.wasm \
+  --wasm target/wasm32v1-none/release/xelma_contract.wasm \
   --output-dir ./bindings \
   --overwrite
 
@@ -322,7 +338,7 @@ console.log(`Wins: ${stats.total_wins}, Streak: ${stats.current_streak}`);
 We take security seriously. The contract has undergone comprehensive hardening:
 
 ### Security Features:
-- ✅ **20 Custom Error Types** - Clear, debuggable error codes
+- ✅ **50 Custom Error Types** - Clear, debuggable error codes
 - ✅ **Checked Arithmetic** - All math operations use `checked_*` to prevent overflow
 - ✅ **Role-Based Access** - Admin creates rounds, Oracle resolves, Users bet
 - ✅ **Input Validation** - All parameters validated (amount > 0, round active, etc.)
@@ -394,21 +410,50 @@ Payload: (
 
 **Use Case**: Track predictions, show leaderboard before resolution, display user guesses.
 
-#### 4. Round Resolved
-Emitted when oracle resolves a round with final price.
+#### 4. Round Summary (Canonical Terminal Event)
+Emitted exactly once per terminal round transition — competitive resolution,
+admin cancellation, or min-participants fallback. Replaces the previously
+separate `("round", "resolved")`, `("round", "cancelled")`, and
+`("round", "fallback")` events.
 
 ```rust
-Topic: ("round", "resolved")
+Topic: ("round", "summary")
 Payload: (
-  round_id: u64,          // Round identifier
-  final_price: u128,      // Actual final price (4 decimals)
-  mode: u32               // 0 = Up/Down, 1 = Precision
+  version: u32,              // Schema version (0 for this layout)
+  round_id: u64,             // Round identifier
+  status: u32,               // 0 = Resolved, 1 = Cancelled, 2 = FallbackRefund
+  mode: u32,                 // 0 = Up/Down, 1 = Precision
+  price_start: u128,         // Starting price (4 decimals)
+  price_final: u128,         // Settlement price or 0 for cancel/fallback
+  pool_up: i128,             // Up-side pool at terminal time (stroops)
+  pool_down: i128,           // Down-side pool at terminal time (stroops)
+  participant_count: u32,    // Total unique participants
+  total_pot: i128,           // Total accumulated round pot (stroops)
+  fee_amount: i128,          // Protocol fees collected (stroops)
+  settled_at_ledger: u32,    // Ledger sequence when archived
+  confidence: Option<u32>    // Oracle confidence in bps (None for cancel/fallback)
 )
 ```
 
-**Use Case**: Trigger winner calculations, update leaderboards, notify users of results.
+**Use Case**: Single canonical event for all terminal round states. Indexers should listen for this event and ignore legacy topic names.
 
-#### 5. Winnings Claimed
+#### 5. Participant Payout Outcome
+Emitted once per participant during round resolution.
+
+```rust
+Topic: ("payout", "outcome")
+Payload: (
+  round_id: u64,          // Round identifier
+  mode: u32,              // 0 = Up/Down, 1 = Precision
+  user: Address,          // Participant address
+  gross_payout: i128,     // Pending winnings credited in stroops; 0 for losses
+  outcome_type: u32       // 0 = loss, 1 = win, 2 = refund
+)
+```
+
+**Use Case**: Reconstruct participant-level settlement outcomes for analytics, UX, and dispute forensics without replaying storage reads.
+
+#### 6. Winnings Claimed
 Emitted when user claims their pending winnings.
 
 ```rust
@@ -421,7 +466,7 @@ Payload: (
 
 **Use Case**: Track payouts, display claim history, calculate platform volume.
 
-#### 6. Windows Updated
+#### 7. Windows Updated
 Emitted when admin updates bet/run window durations.
 
 ```rust
@@ -434,7 +479,7 @@ Payload: (
 
 **Use Case**: Update frontend timers, recalculate round schedules.
 
-#### 7. Initial Mint
+#### 8. Initial Mint
 Emitted when new user mints their first 1000 vXLM.
 
 ```rust
@@ -447,32 +492,7 @@ Payload: (
 
 **Use Case**: Track new users, display welcome messages, analytics.
 
-#### 8. Round Cancelled
-Emitted when admin cancels an active round; all stakes are refunded.
-
-```rust
-Topic: ("round", "cancelled")
-Payload: (
-  round_id: u64,   // Cancelled round
-  reason: u32,     // Admin-supplied reason code
-  pool_up: i128,   // Up-side pool at cancellation (stroops)
-  pool_down: i128  // Down-side pool at cancellation (stroops)
-)
-```
-
-#### 9. Round Fallback (insufficient participants)
-Emitted when a round ends below the minimum-participants threshold; all stakes are refunded.
-
-```rust
-Topic: ("round", "fallback")
-Payload: (
-  round_id: u64,          // Round that triggered the fallback
-  participant_count: u32, // Actual participant count
-  min_required: u32       // Configured minimum that was not met
-)
-```
-
-#### 10. Oracle Heartbeat
+#### 9. Oracle Heartbeat
 Emitted when the oracle records an on-chain liveness heartbeat.
 
 ```rust
@@ -552,6 +572,10 @@ async function watchForNewRounds(contractId: string) {
 - `initialize(admin, oracle)` - One-time contract setup
 - `create_round(start_price, mode)` - Start new betting round (mode: 0=Up/Down, 1=Precision)
 - `set_windows(bet_ledgers, run_ledgers)` - Configure round timing windows
+- `set_round_template(start_price, mode)` - Store the blueprint used by `create_next_from_template`
+- `clear_round_template()` - Remove the configured round template
+- `create_next_from_template()` - Create the next round from the stored template (fails if a round is already active or no template is set)
+- `reset_leaderboard_season()` - Archive the active leaderboard season's rankings and advance to the next season
 
 ### Oracle Functions:
 - `resolve_round(payload)` - Resolve round and trigger payouts (requires `OraclePayload` with price, timestamp, and round ID)
@@ -565,6 +589,12 @@ async function watchForNewRounds(contractId: string) {
 - `get_max_precision_participants()` - Check the active Precision participant cap
 - `get_precision_predictions()` - View all predictions in current Precision round
 - `get_updown_positions()` - View all positions in current Up/Down round
+- `get_round_template()` - View the configured round template, if any
+- `get_leaderboard_by_wins(offset, limit)` / `get_leaderboard_by_streak(offset, limit)` - Paginated lifetime (all-time) leaderboards, independent of seasons
+- `get_current_season_id()` - Id of the currently-active leaderboard season (default 1)
+- `get_season_user_stats(season_id, user)` - A user's win/loss/streak stats scoped to one season (active or archived)
+- `get_season_leaderboard_by_wins(season_id, offset, limit)` / `get_season_leaderboard_by_streak(season_id, offset, limit)` - Paginated season-scoped leaderboards; transparently served live for the active season or from the frozen archive for a past one
+- `get_season_archive(season_id)` - The frozen snapshot of a past season's final rankings
 
 ---
 
@@ -678,6 +708,8 @@ export ORACLE_ADDRESS="G..."
 - [ ] Post-deployment: configure round windows with `set_windows()`
 - [ ] Post-deployment: verify with `get_admin()` and `get_oracle()`
 
+For the full staged deployment and incident response playbook, see [docs/DEPLOYMENT_RUNBOOK.md](./docs/DEPLOYMENT_RUNBOOK.md). Operators can execute the machine-checkable checklist with `python3 scripts/check_release_checklist.py --network mainnet --strict`.
+
 ### Deployment Script
 
 `scripts/deploy_testnet.sh` performs the following steps:
@@ -700,10 +732,12 @@ Safety guarantees:
 
 We welcome contributions from the community! Start with the maintainer workflow docs:
 
+- **[CONTRIBUTOR_MAP.md](./docs/CONTRIBUTOR_MAP.md)** — Module → test → task map (start here!)
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [GOVERNANCE.md](./GOVERNANCE.md)
 - [SUPPORT.md](./SUPPORT.md)
 - [COMPATIBILITY_POLICY.md](./COMPATIBILITY_POLICY.md) — ABI/storage/event versioning rules
+- [docs/CONTRIBUTOR_MAP.md](./docs/CONTRIBUTOR_MAP.md) — protocol areas, files, tests, and starter tasks
 - [CODEOWNERS](./.github/CODEOWNERS)
 
 Here's how you can help:
@@ -745,7 +779,7 @@ This repository contains both source files and generated artifacts. Understandin
 **1. Build the Smart Contract:**
 ```bash
 cd contracts
-cargo build --target wasm32-unknown-unknown --release
+stellar contract build
 ```
 
 **2. Regenerate TypeScript Bindings:**
@@ -753,7 +787,7 @@ After building the contract, generate the bindings from the WASM file:
 ```bash
 cd ../
 stellar contract bindings typescript \
-  --wasm target/wasm32-unknown-unknown/release/xelma_contract.wasm \
+  --wasm target/wasm32v1-none/release/xelma_contract.wasm \
   --output-dir ./bindings/src \
   --overwrite
 ```
@@ -785,11 +819,11 @@ cargo test
 2. **If you modified the contract**, regenerate bindings:
    ```bash
    # Build contract
-   cargo build --target wasm32-unknown-unknown --release --package xelma-contract
+   stellar contract build --package xelma-contract
    
    # Regenerate bindings
    stellar contract bindings typescript \
-     --wasm target/wasm32-unknown-unknown/release/xelma_contract.wasm \
+     --wasm target/wasm32v1-none/release/xelma_contract.wasm \
      --output-dir ./bindings/src \
      --overwrite
    
@@ -808,12 +842,17 @@ Check issues labeled [`good-first-issue`](https://github.com/TevaLabs/Xelma-Bloc
 
 ## 📚 Documentation
 
+- **[Contributor Map](./docs/CONTRIBUTOR_MAP.md)** — Module → test → task map (new contributors start here!)
+- **[Contributor Task Matrix](./docs/CONTRIBUTOR_TASK_MATRIX.md)** — PR evidence requirements for every task type
 - **[Smart Contract](./contracts/src/)** - Modular Rust code (contract, types, errors)
 - **[Protocol Spec](./PROTOCOL_SPEC.md)** - Formal invariants, threat model, and test traceability
 - **[Security Review](./SECURITY_REVIEW.md)** - Security analysis and best practices
+- **[Event Schema](./docs/EVENT_SCHEMA.md)** — Canonical on-chain event schema for indexers
+- **[Storage Lifecycle](./docs/storage_lifecycle.md)** — TTL/rent policy for persistent keys
 - **[Bindings Guide](./bindings/README.md)** - TypeScript integration guide
 - **[Wallet Error Guide](./docs/WALLET_ERROR_GUIDE.md)** - Mapping of contract error codes to UI messages
 - **[Test Suite](./contracts/src/tests/)** - Comprehensive test examples
+- **[Demo Scenarios](./docs/DEMO.md)** - Scripted Up-win, Down-win, and Precision-tie demos with end-state assertions
 
 ---
 

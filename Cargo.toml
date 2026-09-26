@@ -2,10 +2,13 @@
 resolver = "2"
 members = [
     "contracts",
+    "replay-engine",
 ]
 
 [workspace.dependencies]
-soroban-sdk = "23.0.1"
+soroban-sdk = "=23.0.1"
+proptest = "1.0"
+rand = "0.8"
 
 [profile.release]
 opt-level = "z"

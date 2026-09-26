@@ -4,12 +4,28 @@
 use super::config_helpers::{apply_max_stake, apply_max_user_exposure, apply_windows};
 use crate::contract::{VirtualTokenContract, VirtualTokenContractClient};
 use crate::errors::ContractError;
-use crate::types::{BetSide, OraclePayload, RoundMode};
+use crate::types::{
+    BetSide, DataKeyCore, DataKeyScoped, OraclePayload, PrecisionCommitment, PrecisionPrediction,
+    RoundMode, UserPosition,
+};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger as _},
-    Address, Env, TryIntoVal,
+    Address, BytesN, Env, TryIntoVal, Vec,
 };
+
+/// Salt satisfying on-chain minimum entropy (non-zero, non-constant).
+fn test_salt(env: &Env, seed: u8) -> BytesN<32> {
+    let mut bytes = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        bytes[i] = seed.wrapping_add(i as u8).wrapping_mul(17).wrapping_add(3);
+        i += 1;
+    }
+    bytes[0] = seed | 0x80;
+    bytes[31] = seed ^ 0x5A;
+    BytesN::from_array(env, &bytes)
+}
 
 #[test]
 fn test_create_round_default_mode() {
@@ -23,6 +39,7 @@ fn test_create_round_default_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create round without specifying mode (should default to UpDown)
     client.create_round(&1_0000000, &None);
@@ -43,6 +60,7 @@ fn test_create_round_updown_mode_explicit() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create round with explicit Up/Down mode (0)
     client.create_round(&1_0000000, &Some(0));
@@ -63,6 +81,7 @@ fn test_create_round_precision_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create round with Precision mode (1)
     client.create_round(&1_0000000, &Some(1));
@@ -83,6 +102,7 @@ fn test_create_round_invalid_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Try to create round with invalid mode (2)
     let result = client.try_create_round(&1_0000000, &Some(2));
@@ -102,6 +122,7 @@ fn test_place_bet_on_updown_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Up/Down round
@@ -128,6 +149,7 @@ fn test_place_bet_on_precision_mode_fails() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -151,6 +173,7 @@ fn test_place_precision_prediction_on_precision_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -181,6 +204,7 @@ fn test_place_precision_prediction_on_updown_mode_fails() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Up/Down round
@@ -204,6 +228,7 @@ fn test_precision_prediction_already_bet() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -231,6 +256,7 @@ fn test_get_precision_predictions() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -279,6 +305,7 @@ fn test_get_updown_positions() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -317,6 +344,7 @@ fn test_precision_insufficient_balance() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user); // Has 1000 vXLM
 
     // Create Precision round
@@ -344,6 +372,7 @@ fn test_precision_round_ended() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round (default bet window is 6 ledgers)
@@ -372,6 +401,7 @@ fn test_precision_invalid_amount() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -399,6 +429,7 @@ fn test_predict_price_alias() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -428,6 +459,7 @@ fn test_predict_price_valid_scales() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Test various valid price scales (4 decimal places)
     let test_cases = [
@@ -454,7 +486,8 @@ fn test_predict_price_valid_scales() {
                 nonce: 1u64,
                 network_id: env.ledger().network_id(),
                 contract_addr: contract_id.clone(),
-            });
+                confidence: None,
+                attestation: None,            });
         }
 
         // Create new Precision round for each test case
@@ -487,6 +520,7 @@ fn test_predict_price_invalid_scale() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round
@@ -494,11 +528,11 @@ fn test_predict_price_invalid_scale() {
 
     // Try to predict with price exceeding max scale (> 9999.9999)
     let result = client.try_predict_price(&user, &100_000_000, &100_0000000);
-    assert_eq!(result, Err(Ok(ContractError::InvalidPriceScale)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidPrice)));
 
     // Try with extremely large value
     let result = client.try_predict_price(&user, &999_999_999_999, &100_0000000);
-    assert_eq!(result, Err(Ok(ContractError::InvalidPriceScale)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidPrice)));
 }
 
 #[test]
@@ -514,6 +548,7 @@ fn test_predict_price_event_emission() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Create Precision round at ledger 0
@@ -555,6 +590,7 @@ fn test_all_events_for_updown_round() {
 
     // 1. Initialize (no event expected)
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // 2. Mint initial tokens - should emit mint event
     client.mint_initial(&user1);
@@ -613,7 +649,7 @@ fn test_all_events_for_updown_round() {
     });
     assert!(bet_event.is_some(), "Second bet should emit event");
 
-    // 5. Resolve round - should emit round resolved event
+    // 5. Resolve round - should emit round summary event
     let round = client.get_active_round().unwrap();
     env.ledger().with_mut(|li| {
         li.sequence_number = round.end_ledger;
@@ -626,18 +662,19 @@ fn test_all_events_for_updown_round() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     let events = env.events().all();
     let resolved_event = events.iter().find(|e| {
         let (_contract, topics, _data) = e;
         topics.len() == 2
             && topics.get(0).unwrap().try_into_val(&env) == Ok(symbol_short!("round"))
-            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("resolved"))
+            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("summary"))
     });
     assert!(
         resolved_event.is_some(),
-        "Round resolved event should be emitted"
+        "Round summary event should be emitted"
     );
 
     // 6. Claim winnings - should emit claim event
@@ -671,6 +708,7 @@ fn test_all_events_for_precision_round() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user1);
     env.events().all();
     client.mint_initial(&user2);
@@ -746,14 +784,15 @@ fn test_all_events_for_precision_round() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     let events = env.events().all();
     let resolved_event = events.iter().find(|e| {
         let (_contract, topics, _data) = e;
         topics.len() == 2
             && topics.get(0).unwrap().try_into_val(&env) == Ok(symbol_short!("round"))
-            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("resolved"))
+            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("summary"))
     });
     assert!(
         resolved_event.is_some(),
@@ -788,6 +827,7 @@ fn test_windows_update_event() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Update windows - should emit windows updated event
     apply_windows(&env, &client, 10, 30);
@@ -820,6 +860,7 @@ fn test_precision_prediction_exceeds_max_stake_fails() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     apply_max_stake(&env, &client, Some(50_0000000i128));
     client.create_round(&1_0000000, &Some(1));
@@ -840,6 +881,7 @@ fn test_precision_prediction_at_max_stake_boundary_succeeds() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     apply_max_stake(&env, &client, Some(100_0000000i128));
     client.create_round(&1_0000000, &Some(1));
@@ -861,11 +903,114 @@ fn test_precision_prediction_exposure_cap_exceeded_fails() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     apply_max_user_exposure(&env, &client, Some(75_0000000i128));
     client.create_round(&1_0000000, &Some(1));
 
     let result = client.try_place_precision_prediction(&user, &80_0000000, &2297u128);
+    assert_eq!(result, Err(Ok(ContractError::ExposureCapExceeded)));
+}
+
+#[test]
+fn test_updown_bet_counts_precision_commitment_toward_exposure_cap() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+    apply_max_user_exposure(&env, &client, Some(100_0000000i128));
+    client.create_round(&1_0000000, &Some(0));
+
+    let round = client.get_active_round().unwrap();
+    let commitment = PrecisionCommitment {
+        hash: BytesN::from_array(&env, &[9u8; 32]),
+        amount: 75_0000000,
+        revealed: false,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKeyScoped::PrecisionCommitment(round.round_id, user.clone()), &commitment);
+    });
+
+    let result = client.try_place_bet(&user, &30_0000000, &BetSide::Up);
+    assert_eq!(result, Err(Ok(ContractError::ExposureCapExceeded)));
+}
+
+#[test]
+fn test_precision_prediction_counts_updown_position_toward_exposure_cap() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+    apply_max_user_exposure(&env, &client, Some(100_0000000i128));
+    client.create_round(&1_0000000, &Some(1));
+
+    let round = client.get_active_round().unwrap();
+    let position = UserPosition {
+        amount: 75_0000000,
+        side: BetSide::Up,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKeyScoped::Position(round.round_id, user.clone()), &position);
+    });
+
+    let result = client.try_place_precision_prediction(&user, &30_0000000, &2297u128);
+    assert_eq!(result, Err(Ok(ContractError::ExposureCapExceeded)));
+}
+
+#[test]
+fn test_commit_prediction_counts_precision_prediction_toward_exposure_cap() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+    apply_max_user_exposure(&env, &client, Some(100_0000000i128));
+    client.create_round(&1_0000000, &Some(1));
+
+    let round = client.get_active_round().unwrap();
+    let prediction = PrecisionPrediction {
+        user: user.clone(),
+        predicted_price: 2297,
+        amount: 75_0000000,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKeyScoped::PrecisionPosition(round.round_id, user.clone()), &prediction);
+    });
+
+    let result = client.try_commit_prediction(
+        &user,
+        &BytesN::from_array(&env, &[11u8; 32]),
+        &30_0000000,
+    );
     assert_eq!(result, Err(Ok(ContractError::ExposureCapExceeded)));
 }
 
@@ -881,6 +1026,7 @@ fn test_caps_disabled_precision_prediction_succeeds() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     // No caps configured — large bet allowed
     client.create_round(&1_0000000, &Some(1));
@@ -900,6 +1046,7 @@ fn test_default_precision_participant_cap_allows_predictions_below_cap() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     assert_eq!(client.get_max_precision_participants(), 1_000);
@@ -924,6 +1071,7 @@ fn test_custom_precision_participant_cap_boundary_and_over_cap() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.set_max_precision_participants(&2u32);
     client.mint_initial(&user1);
     client.mint_initial(&user2);
@@ -934,10 +1082,7 @@ fn test_custom_precision_participant_cap_boundary_and_over_cap() {
     client.place_precision_prediction(&user2, &100_0000000, &2298u128);
 
     let result = client.try_place_precision_prediction(&user3, &100_0000000, &2299u128);
-    assert_eq!(
-        result,
-        Err(Ok(ContractError::PrecisionParticipantCapExceeded))
-    );
+    assert_eq!(result, Err(Ok(ContractError::PrecisionCapExceeded)));
     assert_eq!(client.balance(&user3), 1000_0000000);
     assert!(client.get_user_precision_prediction(&user3).is_none());
 }
@@ -953,15 +1098,13 @@ fn test_set_max_precision_participants_validation() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     let zero = client.try_set_max_precision_participants(&0u32);
-    assert_eq!(zero, Err(Ok(ContractError::InvalidPrecisionParticipantCap)));
+    assert_eq!(zero, Err(Ok(ContractError::InvalidPrecisionCap)));
 
     let too_high = client.try_set_max_precision_participants(&10_001u32);
-    assert_eq!(
-        too_high,
-        Err(Ok(ContractError::InvalidPrecisionParticipantCap))
-    );
+    assert_eq!(too_high, Err(Ok(ContractError::InvalidPrecisionCap)));
 
     client.set_max_precision_participants(&3u32);
     assert_eq!(client.get_max_precision_participants(), 3u32);
@@ -982,11 +1125,12 @@ fn test_precision_commit_reveal_happy_path() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1022,11 +1166,12 @@ fn test_precision_commit_reveal_already_revealed() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1060,11 +1205,12 @@ fn test_precision_commit_reveal_hash_mismatch() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1080,7 +1226,7 @@ fn test_precision_commit_reveal_hash_mismatch() {
     let result = client.try_reveal_prediction(&user, &2500, &salt.clone());
     assert_eq!(result, Err(Ok(ContractError::HashMismatch)));
 
-    let wrong_salt = BytesN::from_array(&env, &[8; 32]);
+    let wrong_salt = test_salt(&env, 8);
     let result = client.try_reveal_prediction(&user, &price, &wrong_salt);
     assert_eq!(result, Err(Ok(ContractError::HashMismatch)));
 }
@@ -1100,11 +1246,12 @@ fn test_precision_commit_reveal_invalid_window_early() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1133,11 +1280,12 @@ fn test_precision_commit_reveal_invalid_window_late() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1157,8 +1305,6 @@ fn test_precision_commit_reveal_invalid_window_late() {
 
 #[test]
 fn test_precision_commit_reveal_commitment_not_found() {
-    use soroban_sdk::BytesN;
-
     let env = Env::default();
     let contract_id = env.register(VirtualTokenContract, ());
     let client = VirtualTokenContractClient::new(&env, &contract_id);
@@ -1169,6 +1315,7 @@ fn test_precision_commit_reveal_commitment_not_found() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
@@ -1177,7 +1324,7 @@ fn test_precision_commit_reveal_commitment_not_found() {
     });
 
     // Reveal without commit
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let result = client.try_reveal_prediction(&user, &2297, &salt);
     assert_eq!(result, Err(Ok(ContractError::CommitmentNotFound)));
 }
@@ -1197,11 +1344,12 @@ fn test_precision_commit_reveal_double_bet_fails() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &Some(1));
 
     let price = 2297u128;
-    let salt = BytesN::from_array(&env, &[9; 32]);
+    let salt = test_salt(&env, 9);
     let mut preimage = Bytes::new(&env);
     preimage.append(&price.to_xdr(&env));
     preimage.append(&salt.clone().to_xdr(&env));
@@ -1214,6 +1362,66 @@ fn test_precision_commit_reveal_double_bet_fails() {
     let result = client.try_place_precision_prediction(&user, &50_0000000, &2297);
     assert_eq!(result, Err(Ok(ContractError::AlreadyBet)));
 }
+
+#[test]
+fn test_precision_commit_rejects_zero_commitment_hash() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+    client.create_round(&1_0000000, &Some(1));
+
+    let zero = BytesN::from_array(&env, &[0u8; 32]);
+    let result = client.try_commit_prediction(&user, &zero, &100_0000000);
+    assert_eq!(result, Err(Ok(ContractError::InvalidPrice)));
+}
+
+#[test]
+fn test_precision_reveal_rejects_low_entropy_salt() {
+    use soroban_sdk::xdr::ToXdr;
+    use soroban_sdk::Bytes;
+
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+    client.create_round(&1_0000000, &Some(1));
+
+    let price = 2297u128;
+    let salt = test_salt(&env, 9);
+    let mut preimage = Bytes::new(&env);
+    preimage.append(&price.to_xdr(&env));
+    preimage.append(&salt.clone().to_xdr(&env));
+    let hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+    client.commit_prediction(&user, &hash, &100_0000000);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 7;
+    });
+
+    let zero_salt = BytesN::from_array(&env, &[0u8; 32]);
+    assert_eq!(
+        client.try_reveal_prediction(&user, &price, &zero_salt),
+        Err(Ok(ContractError::InvalidPrice))
+    );
+}
+
 #[test]
 fn test_precision_predictions_page_ordering_matches_full_read() {
     let env = Env::default();
@@ -1226,6 +1434,7 @@ fn test_precision_predictions_page_ordering_matches_full_read() {
     let carol = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
     client.mint_initial(&carol);
@@ -1267,6 +1476,7 @@ fn test_precision_predictions_page_respects_offset_and_limit() {
     let carol = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
     client.mint_initial(&carol);
@@ -1310,6 +1520,7 @@ fn test_precision_predictions_page_offset_past_end_is_empty() {
     let alice = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000, &Some(1));
@@ -1334,6 +1545,7 @@ fn test_precision_predictions_page_zero_limit_is_empty() {
     let alice = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000, &Some(1));
@@ -1352,6 +1564,7 @@ fn test_precision_predictions_page_no_active_round_is_empty() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // No round created at all.
     let page = client.get_precision_predictions_page(&0, &10);
@@ -1370,6 +1583,7 @@ fn test_updown_positions_page_respects_offset_and_limit() {
     let carol = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
     client.mint_initial(&carol);
@@ -1429,6 +1643,7 @@ fn test_updown_positions_page_offset_past_end_is_empty() {
     let alice = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000, &Some(0));
@@ -1451,6 +1666,7 @@ fn test_updown_positions_page_zero_limit_is_empty() {
     let alice = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000, &Some(0));
@@ -1469,6 +1685,7 @@ fn test_updown_positions_page_no_active_round_is_empty() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     let page = client.get_updown_positions_page(&0, &10);
     assert_eq!(page.len(), 0);
@@ -1485,6 +1702,7 @@ fn test_precision_predictions_page_limit_is_capped_at_max_page_size() {
     let bob = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -1498,4 +1716,312 @@ fn test_precision_predictions_page_limit_is_capped_at_max_page_size() {
     // the cap doesn't break normal small-round behavior).
     let page = client.get_precision_predictions_page(&0, &1_000_000);
     assert_eq!(page.len(), 2);
+}
+
+// ============================================================================
+// MODE ALTERNATION REGRESSION TESTS (Issue #259)
+// ============================================================================
+// Verify that stale position data does not persist across mode switches.
+// The unified repository API (storage.rs) ensures clean_round_storage and
+// clean_user_positions remove ALL mode-specific keys regardless of which
+// mode is active.
+
+#[test]
+fn test_alternation_updown_after_precision_no_stale_data() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&alice);
+    client.mint_initial(&bob);
+
+    // --- Step 1: Run a Precision round ---
+    client.create_round(&2000, &Some(1));
+    let precision_round_id = client.get_last_round_id();
+    client.place_precision_prediction(&alice, &100_0000000, &2297);
+    client.place_precision_prediction(&bob, &150_0000000, &2300);
+
+    env.ledger().with_mut(|li| li.sequence_number = 12);
+    client.resolve_round(&OraclePayload {
+        price: 2298,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 1u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // --- Step 2: Run an UpDown round (mode switch) ---
+    client.create_round(&1_5000000, &None);
+    let updown_round_id = client.get_last_round_id();
+    client.place_bet(&alice, &100_0000000, &BetSide::Up);
+    client.place_bet(&bob, &50_0000000, &BetSide::Down);
+
+    env.ledger().with_mut(|li| li.sequence_number = 25);
+    client.resolve_round(&OraclePayload {
+        price: 2_0000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 2u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // --- Step 3: Verify no stale Precision data leaks into UpDown round ---
+    // Use as_contract to check raw storage
+    env.as_contract(&contract_id, || {
+        // Stale PrecisionPosition from the first round should be cleared
+        let stale_pred_key = DataKeyScoped::PrecisionPosition(precision_round_id, alice.clone());
+        let has_stale_pred = env.storage().persistent().has(&stale_pred_key);
+        assert!(
+            !has_stale_pred,
+            "Precision position from round {} should have been cleared after resolution",
+            precision_round_id
+        );
+
+        // Stale PrecisionCommitment from the first round should be cleared
+        let stale_commit_key =
+            DataKeyScoped::PrecisionCommitment(precision_round_id, alice.clone());
+        let has_stale_commit = env.storage().persistent().has(&stale_commit_key);
+        assert!(
+            !has_stale_commit,
+            "Precision commitment from round {} should have been cleared",
+            precision_round_id
+        );
+
+        // Stale Position from the UpDown round should be cleared
+        let stale_pos_key = DataKeyScoped::Position(updown_round_id, alice.clone());
+        let has_stale_pos = env.storage().persistent().has(&stale_pos_key);
+        assert!(
+            !has_stale_pos,
+            "Position from round {} should have been cleared after resolution",
+            updown_round_id
+        );
+
+        // Legacy keys should also be cleared
+        let has_legacy_updown = env.storage().persistent().has(&DataKeyCore::UpDownPositions);
+        assert!(!has_legacy_updown, "Legacy UpDownPositions should be cleared");
+
+        let has_legacy_precision = env.storage().persistent().has(&DataKeyCore::PrecisionPositions);
+        assert!(
+            !has_legacy_precision,
+            "Legacy PrecisionPositions should be cleared"
+        );
+    });
+}
+
+#[test]
+fn test_alternation_precision_after_updown_no_stale_data() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&alice);
+
+    // --- Step 1: Run an UpDown round ---
+    client.create_round(&1_0000000, &None);
+    let updown_round_id = client.get_last_round_id();
+    client.place_bet(&alice, &100_0000000, &BetSide::Up);
+
+    env.ledger().with_mut(|li| li.sequence_number = 12);
+    client.resolve_round(&OraclePayload {
+        price: 1_5000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 1u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // --- Step 2: Run a Precision round (mode switch) ---
+    client.create_round(&2000, &Some(1));
+    let precision_round_id = client.get_last_round_id();
+    client.place_precision_prediction(&alice, &100_0000000, &2297);
+
+    env.ledger().with_mut(|li| li.sequence_number = 25);
+    client.resolve_round(&OraclePayload {
+        price: 2298,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 2u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // --- Step 3: Verify no stale UpDown data leaks into Precision round ---
+    env.as_contract(&contract_id, || {
+        let stale_pos_key = DataKeyScoped::Position(updown_round_id, alice.clone());
+        let has_stale_pos = env.storage().persistent().has(&stale_pos_key);
+        assert!(
+            !has_stale_pos,
+            "Position from round {} should have been cleared after resolution",
+            updown_round_id
+        );
+
+        let stale_pred_key = DataKeyScoped::PrecisionPosition(precision_round_id, alice.clone());
+        let has_stale_pred = env.storage().persistent().has(&stale_pred_key);
+        assert!(
+            !has_stale_pred,
+            "Precision position from round {} should have been cleared",
+            precision_round_id
+        );
+    });
+}
+
+#[test]
+fn test_alternation_cancel_clears_both_modes() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&alice);
+
+    // Run a Precision round then cancel it
+    client.create_round(&2000, &Some(1));
+    let round_id = client.get_last_round_id();
+    client.place_precision_prediction(&alice, &100_0000000, &2297);
+
+    client.cancel_round(&42u32);
+
+    // Verify all position keys are cleared after cancellation
+    env.as_contract(&contract_id, || {
+        let pred_key = DataKeyScoped::PrecisionPosition(round_id, alice.clone());
+        assert!(!env.storage().persistent().has(&pred_key));
+
+        let commit_key = DataKeyScoped::PrecisionCommitment(round_id, alice.clone());
+        assert!(!env.storage().persistent().has(&commit_key));
+
+        // Cross-mode key should also be absent (never set, but verify no phantom data)
+        let pos_key = DataKeyScoped::Position(round_id, alice.clone());
+        assert!(!env.storage().persistent().has(&pos_key));
+
+        // Round participants should be cleared
+        let participants_key = DataKeyScoped::RoundParticipants(round_id);
+        assert!(!env.storage().persistent().has(&participants_key));
+    });
+}
+
+#[test]
+fn test_alternation_three_round_cycle_no_stale_data() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let alice = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&alice);
+
+    let mut round_ids: Vec<u64> = Vec::new(&env);
+
+    // Round 1: Precision
+    client.create_round(&2000, &Some(1));
+    round_ids.push_back(client.get_last_round_id());
+    client.place_precision_prediction(&alice, &100_0000000, &2100);
+    env.ledger().with_mut(|li| li.sequence_number = 12);
+    client.resolve_round(&OraclePayload {
+        price: 2100,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 1u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // Round 2: UpDown
+    client.create_round(&1_5000000, &None);
+    round_ids.push_back(client.get_last_round_id());
+    client.place_bet(&alice, &100_0000000, &BetSide::Up);
+    env.ledger().with_mut(|li| li.sequence_number = 25);
+    client.resolve_round(&OraclePayload {
+        price: 2_0000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 2u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // Round 3: Precision again
+    client.create_round(&3000, &Some(1));
+    round_ids.push_back(client.get_last_round_id());
+    client.place_precision_prediction(&alice, &100_0000000, &3000);
+    env.ledger().with_mut(|li| li.sequence_number = 38);
+    client.resolve_round(&OraclePayload {
+        price: 3000,
+        timestamp: env.ledger().timestamp(),
+        round_id: client.get_active_round().map(|r| r.start_ledger).unwrap_or(0),
+        nonce: 3u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    // Verify NO stale data from any round
+    env.as_contract(&contract_id, || {
+        for i in 0..round_ids.len() {
+            if let Some(rid) = round_ids.get(i) {
+                let pos_key = DataKeyScoped::Position(rid, alice.clone());
+                let pred_key = DataKeyScoped::PrecisionPosition(rid, alice.clone());
+                let commit_key = DataKeyScoped::PrecisionCommitment(rid, alice.clone());
+                let participants_key = DataKeyScoped::RoundParticipants(rid);
+
+                assert!(
+                    !env.storage().persistent().has(&pos_key),
+                    "Stale Position({}, _) after 3-round cycle",
+                    rid
+                );
+                assert!(
+                    !env.storage().persistent().has(&pred_key),
+                    "Stale PrecisionPosition({}, _) after 3-round cycle",
+                    rid
+                );
+                assert!(
+                    !env.storage().persistent().has(&commit_key),
+                    "Stale PrecisionCommitment({}, _) after 3-round cycle",
+                    rid
+                );
+                assert!(
+                    !env.storage().persistent().has(&participants_key),
+                    "Stale RoundParticipants({}) after 3-round cycle",
+                    rid
+                );
+            }
+        }
+    });
 }

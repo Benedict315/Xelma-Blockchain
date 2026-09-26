@@ -13,11 +13,13 @@ use crate::contract::{VirtualTokenContract, VirtualTokenContractClient};
 use crate::errors::ContractError;
 use crate::types::{BetSide, ConfigChangeKind};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    Address, Env,
+    symbol_short,
+    testutils::{Address as _, Events, Ledger as _},
+    Address, Env, TryIntoVal,
 };
 
 /// Must match `CONFIG_TIMELOCK_LEDGERS` in contract.rs.
+#[allow(dead_code)]
 const CONFIG_TIMELOCK_LEDGERS: u32 = 1440;
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
@@ -30,6 +32,7 @@ fn setup() -> (Env, Address, Address, VirtualTokenContractClient<'static>) {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     (env, admin, oracle, client)
 }
 
@@ -39,9 +42,12 @@ fn setup() -> (Env, Address, Address, VirtualTokenContractClient<'static>) {
 /// cleared (so a second claim returns 0) and the user's balance must reflect the
 /// credited amount. This confirms the Effect (slot removal) occurs before the
 /// balance increase, and the function is idempotent after the first claim.
+///
+/// Additionally verifies the structured event contains:
+///   (user, amount_claimed, balance_before, balance_after)
 #[test]
 fn test_claim_winnings_cei_pending_cleared_after_claim() {
-    let (env, admin, oracle, client) = setup();
+    let (env, _admin, _oracle, client) = setup();
 
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
@@ -73,8 +79,9 @@ fn test_claim_winnings_cei_pending_cleared_after_claim() {
         round_id: round.start_ledger,
         nonce: 1,
         network_id: env.ledger().network_id(),
-        contract_addr: env.current_contract_address(),
-    };
+        contract_addr: client.address.clone(),
+        confidence: None,
+        attestation: None,    };
     client.resolve_round(&payload);
 
     // Alice should have pending winnings.
@@ -105,9 +112,37 @@ fn test_claim_winnings_cei_pending_cleared_after_claim() {
         "user balance must increase by claimed amount"
     );
 
+    // Structured event verification: (user, amount_claimed, balance_before, balance_after)
+    let events = env.events().all();
+    let claim_event = events
+        .iter()
+        .rev()
+        .find(|e| {
+            let (_contract, topics, _data) = e;
+            topics.len() == 2
+                && topics.get(0).unwrap().try_into_val(&env)
+                    == Ok(symbol_short!("claim"))
+                && topics.get(1).unwrap().try_into_val(&env)
+                    == Ok(symbol_short!("winnings"))
+        })
+        .expect("claim_winnings event must be present");
+
+    let (_contract, _topics, data) = claim_event;
+    #[allow(clippy::type_complexity)]
+    let parsed: Result<(Address, i128, i128, i128), _> = data.try_into_val(&env);
+    let (ev_user, ev_amount, ev_balance_before, ev_balance_after) =
+        parsed.expect("event data must parse as (Address, i128, i128, i128)");
+    assert_eq!(ev_user, alice);
+    assert_eq!(ev_amount, pending_before);
+    assert_eq!(ev_balance_before, balance_before_claim);
+    assert_eq!(ev_balance_after, balance_after_claim);
+
     // Idempotency: a second claim returns 0 and does not mutate state.
     let second_claim = client.claim_winnings(&alice);
-    assert_eq!(second_claim, 0, "second claim on empty pending must return 0");
+    assert_eq!(
+        second_claim, 0,
+        "second claim on empty pending must return 0"
+    );
     assert_eq!(
         client.balance(&alice),
         balance_after_claim,
@@ -123,7 +158,7 @@ fn test_claim_winnings_cei_pending_cleared_after_claim() {
 /// after the event Interaction.
 #[test]
 fn test_cancel_config_change_cei_key_removed_before_event() {
-    let (env, _admin, _oracle, client) = setup();
+    let (_env, _admin, _oracle, client) = setup();
 
     // Schedule a windows change (creates PendingConfigChange(Windows)).
     client.schedule_windows(&10, &20);
@@ -178,4 +213,142 @@ fn test_cancel_config_change_rejected_after_activation() {
         Err(Ok(ContractError::RoundNotCancellable)),
         "cancellation must be rejected once activation ledger is reached"
     );
+}
+
+// ─── SR-2026-06-003: claim_winnings mode compatibility ───────────────────────
+
+/// `claim_winnings` must succeed in `Normal` (0) and `ClaimsOnly` (1) modes
+/// but be rejected with `ContractPaused` in `FullyPaused` (2) mode.
+///
+/// Note: rounds are always created/resolved in Normal mode because
+/// `create_round` uses `_ensure_normal_mode`. Only the `claim_winnings`
+/// call itself is tested under each mode.
+#[test]
+fn test_claim_winnings_respects_runtime_mode() {
+    let (env, _admin, _oracle, client) = setup();
+
+    let alice = Address::generate(&env);
+    client.mint_initial(&alice);
+
+    // ── Round 1: Normal mode ─────────────────────────────────────────────
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+        li.timestamp = 1_000_000;
+    });
+    client.create_round(&1_0000000, &None);
+    client.place_bet(&alice, &500_0000000, &BetSide::Up);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 130;
+        li.timestamp = 1_000_700;
+    });
+    let round = client.get_active_round().expect("round should exist");
+    client.resolve_round(&crate::types::OraclePayload {
+        price: 2_0000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: round.start_ledger,
+        nonce: 1,
+        network_id: env.ledger().network_id(),
+        contract_addr: client.address.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    let pending = client.get_pending_winnings(&alice);
+    assert!(pending > 0, "alice should have pending winnings");
+
+    // Normal mode (0) — claim must succeed
+    let bal_before = client.balance(&alice);
+    let claimed = client.claim_winnings(&alice);
+    assert_eq!(claimed, pending, "claim must succeed in Normal mode");
+    assert_eq!(client.balance(&alice), bal_before + pending);
+    assert_eq!(client.get_pending_winnings(&alice), 0);
+
+    // ── Round 2: ClaimsOnly mode ─────────────────────────────────────────
+    // Create & resolve in Normal, then switch to ClaimsOnly before claiming.
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 200;
+        li.timestamp = 2_000_000;
+    });
+    client.create_round(&1_0000000, &None);
+    client.place_bet(&alice, &500_0000000, &BetSide::Up);
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 230;
+        li.timestamp = 2_000_700;
+    });
+    let round2 = client.get_active_round().unwrap();
+    client.resolve_round(&crate::types::OraclePayload {
+        price: 2_0000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: round2.start_ledger,
+        nonce: 2,
+        network_id: env.ledger().network_id(),
+        contract_addr: client.address.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    let pending2 = client.get_pending_winnings(&alice);
+    assert!(pending2 > 0, "alice should have pending winnings after round 2");
+
+    client.set_runtime_mode(&1u32); // switch to ClaimsOnly
+    let bal_before2 = client.balance(&alice);
+    let claimed2 = client.claim_winnings(&alice);
+    assert_eq!(
+        claimed2, pending2,
+        "claim must succeed in ClaimsOnly mode"
+    );
+    assert_eq!(client.balance(&alice), bal_before2 + pending2);
+    assert_eq!(client.get_pending_winnings(&alice), 0);
+
+    // ── Round 3: FullyPaused mode ────────────────────────────────────────
+    // Create & resolve in Normal, then switch to FullyPaused before claiming.
+    client.set_runtime_mode(&0u32); // back to Normal for round creation
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 300;
+        li.timestamp = 3_000_000;
+    });
+    client.create_round(&1_0000000, &None);
+    client.place_bet(&alice, &500_0000000, &BetSide::Up);
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 330;
+        li.timestamp = 3_000_700;
+    });
+    let round3 = client.get_active_round().unwrap();
+    client.resolve_round(&crate::types::OraclePayload {
+        price: 2_0000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: round3.start_ledger,
+        nonce: 3,
+        network_id: env.ledger().network_id(),
+        contract_addr: client.address.clone(),
+        confidence: None,
+    attestation: None,
+    });
+
+    let pending3 = client.get_pending_winnings(&alice);
+    assert!(pending3 > 0, "alice should have pending winnings after round 3");
+    let bal_before3 = client.balance(&alice);
+
+    client.set_runtime_mode(&2u32); // switch to FullyPaused
+    let result = client.try_claim_winnings(&alice);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::ContractPaused)),
+        "claim must be rejected in FullyPaused mode"
+    );
+    // Verify storage unchanged — all-or-nothing guarantee
+    assert_eq!(
+        client.get_pending_winnings(&alice),
+        pending3,
+        "pending must be preserved when claim is rejected"
+    );
+    assert_eq!(
+        client.balance(&alice),
+        bal_before3,
+        "balance must be preserved when claim is rejected"
+    );
+
+    // Restore normal mode so subsequent tests aren't affected.
+    client.set_runtime_mode(&0u32);
 }

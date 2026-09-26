@@ -3,7 +3,7 @@
 
 use crate::contract::{VirtualTokenContract, VirtualTokenContractClient};
 use crate::errors::ContractError;
-use crate::types::{BetSide, DataKey, OraclePayload, Round, RoundArchiveStatus, RoundMode};
+use crate::types::{BetSide, DataKeyCore, DataKeyScoped, OraclePayload, Round, RoundArchiveStatus, RoundMode};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger as _},
@@ -21,6 +21,7 @@ fn test_create_round() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create a round
     let start_price: u128 = 1_5000000; // 1.5 XLM in stroops
@@ -52,6 +53,7 @@ fn test_create_round_does_not_clear_live_positions() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
     client.create_round(&1_0000000, &None);
     client.place_bet(&user, &100_0000000, &BetSide::Up);
@@ -77,6 +79,7 @@ fn test_create_round_while_active_fails() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create first round successfully
     let start_price: u128 = 1_5000000;
@@ -139,6 +142,7 @@ fn test_full_round_lifecycle() {
 
     // STEP 1: Initialize contract
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // STEP 2: Users get initial tokens
     client.mint_initial(&alice);
@@ -191,7 +195,8 @@ fn test_full_round_lifecycle() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     // Round should be cleared
     assert_eq!(client.get_active_round(), None);
@@ -243,6 +248,7 @@ fn test_multiple_rounds_lifecycle() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     // ROUND 1: Alice bets UP and wins
@@ -250,18 +256,18 @@ fn test_multiple_rounds_lifecycle() {
     client.place_bet(&alice, &100_0000000, &BetSide::Up);
 
     env.as_contract(&contract_id, || {
-        // alice's position is already stored under DataKey::Position by place_bet;
+        // alice's position is already stored under DataKeyScoped::Position by place_bet;
         // we only override the round pool totals to inject a simulated losing pool.
         let mut round: Round = env
             .storage()
             .persistent()
-            .get(&DataKey::ActiveRound)
+            .get(&DataKeyCore::ActiveRound)
             .unwrap();
         round.pool_up = 100_0000000;
         round.pool_down = 50_0000000;
         env.storage()
             .persistent()
-            .set(&DataKey::ActiveRound, &round);
+            .set(&DataKeyCore::ActiveRound, &round);
     });
 
     // Advance ledger to allow resolution
@@ -276,7 +282,8 @@ fn test_multiple_rounds_lifecycle() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     client.claim_winnings(&alice);
 
     let stats = client.get_user_stats(&alice);
@@ -291,13 +298,13 @@ fn test_multiple_rounds_lifecycle() {
         let mut round: Round = env
             .storage()
             .persistent()
-            .get(&DataKey::ActiveRound)
+            .get(&DataKeyCore::ActiveRound)
             .unwrap();
         round.pool_up = 80_0000000;
         round.pool_down = 100_0000000;
         env.storage()
             .persistent()
-            .set(&DataKey::ActiveRound, &round);
+            .set(&DataKeyCore::ActiveRound, &round);
     });
 
     // Advance ledger to allow resolution
@@ -312,7 +319,8 @@ fn test_multiple_rounds_lifecycle() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     let stats = client.get_user_stats(&alice);
     assert_eq!(stats.total_wins, 2);
@@ -340,6 +348,7 @@ fn test_create_round_fails_without_admin_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // No mocking all auths, so create_round should fail
     let result = client.try_create_round(&1_0000000, &None);
@@ -367,6 +376,7 @@ fn test_place_bet_fails_without_user_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &user,
@@ -414,6 +424,7 @@ fn test_resolve_round_fails_without_oracle_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &admin,
@@ -438,7 +449,8 @@ fn test_resolve_round_fails_without_oracle_auth() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     assert!(result.is_err());
 }
 
@@ -462,6 +474,7 @@ fn test_claim_winnings_fails_without_user_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &user,
@@ -491,6 +504,7 @@ fn test_round_created_event_includes_mode() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create Up/Down mode round
     client.create_round(&1_0000000, &Some(0));
@@ -522,7 +536,8 @@ fn test_round_created_event_includes_mode() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     client.create_round(&1_0000000, &Some(1));
 
@@ -618,6 +633,7 @@ fn test_cancel_round_refunds_updown_participants() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -649,6 +665,7 @@ fn test_cancel_round_refunds_precision_participants() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -674,6 +691,7 @@ fn test_cancel_round_marks_round_cancelled() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.create_round(&1_0000000, &None);
 
     let round_id = client.get_active_round().unwrap().round_id;
@@ -694,6 +712,7 @@ fn test_cancel_round_no_active_round_fails() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // No active round
     let result = client.try_cancel_round(&0u32);
@@ -711,6 +730,7 @@ fn test_cancel_round_emits_event() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.create_round(&1_0000000, &None);
     client.cancel_round(&42u32);
 
@@ -719,7 +739,7 @@ fn test_cancel_round_emits_event() {
         let (_contract, topics, _data) = e;
         topics.len() == 2
             && topics.get(0).unwrap().try_into_val(&env) == Ok(symbol_short!("round"))
-            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("cancelled"))
+            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("summary"))
     });
     assert!(
         cancel_event.is_some(),
@@ -738,8 +758,15 @@ fn test_cancelled_round_allows_new_round() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.create_round(&1_0000000, &None);
     client.cancel_round(&0u32);
+
+    // A ledger sequence backs at most one round (oracle payloads bind to
+    // `Round.start_ledger`), so advance before creating the replacement.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 1;
+    });
 
     // A new round can be started after cancellation
     client.create_round(&1_2000000, &None);
@@ -761,6 +788,7 @@ fn test_cancel_round_full_refund_equals_pool() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
     client.mint_initial(&charlie);
@@ -798,6 +826,7 @@ fn test_cross_round_mode_alternation() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -812,7 +841,7 @@ fn test_cross_round_mode_alternation() {
 
     // No Precision keys should exist for this round
     env.as_contract(&contract_id, || {
-        let key = DataKey::PrecisionPosition(round1.round_id, alice.clone());
+        let key = DataKeyScoped::PrecisionPosition(round1.round_id, alice.clone());
         assert!(!env.storage().persistent().has(&key));
     });
 
@@ -827,24 +856,21 @@ fn test_cross_round_mode_alternation() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert_eq!(client.get_active_round(), None);
 
     // Verify Up/Down position keys cleared after resolve
     env.as_contract(&contract_id, || {
-        assert!(
-            !env.storage().persistent().has(&DataKey::Position(
-                round1.round_id,
-                alice.clone()
-            ))
-        );
-        assert!(
-            !env.storage().persistent().has(&DataKey::Position(
-                round1.round_id,
-                bob.clone()
-            ))
-        );
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::Position(round1.round_id, alice.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::Position(round1.round_id, bob.clone())));
     });
 
     // Verify archived summary for round 1
@@ -868,12 +894,10 @@ fn test_cross_round_mode_alternation() {
 
     // No Up/Down position keys should exist for round 2
     env.as_contract(&contract_id, || {
-        assert!(
-            !env.storage().persistent().has(&DataKey::Position(
-                round2.round_id,
-                alice.clone()
-            ))
-        );
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::Position(round2.round_id, alice.clone())));
     });
 
     // Resolve at 2298 — Alice closest (diff 1) wins entire pot
@@ -887,24 +911,21 @@ fn test_cross_round_mode_alternation() {
         nonce: 2u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert_eq!(client.get_active_round(), None);
 
     // Verify Precision position keys cleared after resolve
     env.as_contract(&contract_id, || {
-        assert!(
-            !env.storage().persistent().has(&DataKey::PrecisionPosition(
-                round2.round_id,
-                alice.clone()
-            ))
-        );
-        assert!(
-            !env.storage().persistent().has(&DataKey::PrecisionPosition(
-                round2.round_id,
-                bob.clone()
-            ))
-        );
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::PrecisionPosition(round2.round_id, alice.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::PrecisionPosition(round2.round_id, bob.clone())));
     });
 
     // Verify archived summary for round 2
@@ -927,12 +948,10 @@ fn test_cross_round_mode_alternation() {
 
     // No stale Precision keys from round 2 should remain
     env.as_contract(&contract_id, || {
-        assert!(
-            !env.storage().persistent().has(&DataKey::PrecisionPosition(
-                round2.round_id,
-                bob.clone()
-            ))
-        );
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::PrecisionPosition(round2.round_id, bob.clone())));
     });
 
     // Resolve — DOWN wins (price 2.5 < 3.0)
@@ -946,24 +965,21 @@ fn test_cross_round_mode_alternation() {
         nonce: 3u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert_eq!(client.get_active_round(), None);
 
     // Verify Up/Down position keys cleared for round 3
     env.as_contract(&contract_id, || {
-        assert!(
-            !env.storage().persistent().has(&DataKey::Position(
-                round3.round_id,
-                alice.clone()
-            ))
-        );
-        assert!(
-            !env.storage().persistent().has(&DataKey::Position(
-                round3.round_id,
-                bob.clone()
-            ))
-        );
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::Position(round3.round_id, alice.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKeyScoped::Position(round3.round_id, bob.clone())));
     });
 
     // Verify archived summary for round 3
@@ -981,4 +997,238 @@ fn test_cross_round_mode_alternation() {
     assert_eq!(client.balance(&alice), 1300_0000000);
     // Bob:   1000 - 50(R1) + 0 - 150(R2) + 0 - 100(R3) + 0 = 700
     assert_eq!(client.balance(&bob), 700_0000000);
+}
+
+// ─── Round templates / create-next keeper ────────────────────────────────────
+
+/// Set → get → clear round-trip, plus the same validation `create_round`
+/// itself applies (invalid start price, invalid mode).
+#[test]
+fn test_round_template_set_get_clear_and_validation() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    assert_eq!(client.get_round_template(), None);
+
+    // Invalid start price (0) is rejected, same as create_round.
+    let result = client.try_set_round_template(&0u128, &None);
+    assert_eq!(result, Err(Ok(ContractError::InvalidStartPrice)));
+
+    // Invalid start price (over max) is rejected.
+    let result = client.try_set_round_template(&u128::MAX, &None);
+    assert_eq!(result, Err(Ok(ContractError::InvalidStartPrice)));
+
+    // Invalid mode (only 0/1 allowed) is rejected.
+    let result = client.try_set_round_template(&1_0000000u128, &Some(2));
+    assert_eq!(result, Err(Ok(ContractError::InvalidMode)));
+
+    // No template was persisted by any of the rejected attempts.
+    assert_eq!(client.get_round_template(), None);
+
+    // Valid template is stored and readable.
+    client.set_round_template(&1_5000000u128, &Some(1));
+    let template = client.get_round_template().expect("template must be set");
+    assert_eq!(template.start_price, 1_5000000u128);
+    assert_eq!(template.mode, Some(1));
+
+    // A later valid call overwrites the previous template.
+    client.set_round_template(&2_0000000u128, &None);
+    let template = client.get_round_template().expect("template must be set");
+    assert_eq!(template.start_price, 2_0000000u128);
+    assert_eq!(template.mode, None);
+
+    // Clearing removes it; clearing again with nothing configured errors.
+    client.clear_round_template();
+    assert_eq!(client.get_round_template(), None);
+    let result = client.try_clear_round_template();
+    assert_eq!(result, Err(Ok(ContractError::CommitmentNotFound)));
+}
+
+/// `create_next_from_template` requires a template to be configured first.
+#[test]
+fn test_create_next_from_template_requires_template() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    let result = client.try_create_next_from_template();
+    assert_eq!(result, Err(Ok(ContractError::CommitmentNotFound)));
+    assert_eq!(client.get_active_round(), None);
+}
+
+/// Acceptance: overlap is impossible. With a round already active,
+/// `create_next_from_template` must fail exactly like `create_round` would,
+/// and must not disturb the round that is already running.
+#[test]
+fn test_create_next_from_template_overlap_impossible() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    client.set_round_template(&3_0000000u128, &Some(0));
+    client.create_round(&1_0000000u128, &None);
+    let existing_round = client.get_active_round().expect("round should exist");
+
+    let result = client.try_create_next_from_template();
+    assert_eq!(result, Err(Ok(ContractError::RoundAlreadyActive)));
+
+    // The active round is exactly the one that already existed — untouched.
+    let round_after = client.get_active_round().expect("round should still exist");
+    assert_eq!(round_after, existing_round);
+}
+
+/// Acceptance: settle → next. After a round resolves normally, the keeper
+/// call creates the next round from the template with no manual
+/// parameters, and emits both `("round", "created")` and
+/// `("template", "applied")`.
+#[test]
+fn test_create_next_from_template_after_settle() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let alice = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&alice);
+
+    client.set_round_template(&2_5000000u128, &Some(1));
+
+    client.create_round(&1_0000000u128, &None);
+    let round1 = client.get_active_round().unwrap();
+    client.place_bet(&alice, &100_0000000, &BetSide::Up);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = round1.end_ledger;
+    });
+    client.resolve_round(&OraclePayload {
+        price: 1_5000000,
+        timestamp: env.ledger().timestamp(),
+        round_id: round1.start_ledger,
+        nonce: 1u64,
+        network_id: env.ledger().network_id(),
+        contract_addr: contract_id.clone(),
+        confidence: None,
+        attestation: None,    });
+    assert_eq!(client.get_active_round(), None);
+
+    let next_round_id = client.create_next_from_template();
+
+    // Snapshot events immediately after the mutating call — any further
+    // contract invocation (even a read-only query) clears the recorded
+    // event log in this soroban-sdk testutils version, so assertions on
+    // `env.events()` must happen before any subsequent client call.
+    let events = env.events().all();
+    let created_event = events.iter().any(|e| {
+        let (_c, topics, _d) = e;
+        topics.len() == 2
+            && topics.get(0).unwrap().try_into_val(&env) == Ok(symbol_short!("round"))
+            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("created"))
+    });
+    let applied_event = events.iter().any(|e| {
+        let (_c, topics, _d) = e;
+        topics.len() == 2
+            && topics.get(0).unwrap().try_into_val(&env) == Ok(symbol_short!("template"))
+            && topics.get(1).unwrap().try_into_val(&env) == Ok(symbol_short!("applied"))
+    });
+    assert!(
+        created_event,
+        "create_next_from_template must emit round/created"
+    );
+    assert!(
+        applied_event,
+        "create_next_from_template must emit template/applied"
+    );
+
+    assert_eq!(next_round_id, round1.round_id + 1);
+    let round2 = client
+        .get_active_round()
+        .expect("template round must be active");
+    assert_eq!(round2.round_id, next_round_id);
+    assert_eq!(round2.price_start, 2_5000000u128);
+    assert_eq!(round2.mode, RoundMode::Precision);
+}
+
+/// Acceptance: cancel → next. After an admin cancellation, the keeper call
+/// creates the next round from the template.
+#[test]
+fn test_create_next_from_template_after_cancel() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    client.set_round_template(&4_0000000u128, &None);
+
+    client.create_round(&1_0000000u128, &None);
+    let round1 = client.get_active_round().unwrap();
+    client.cancel_round(&1u32);
+    assert_eq!(client.get_active_round(), None);
+
+    // A ledger sequence backs at most one round (oracle payloads bind to
+    // `Round.start_ledger`), so advance before creating the replacement.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 1;
+    });
+
+    let next_round_id = client.create_next_from_template();
+    assert_eq!(next_round_id, round1.round_id + 1);
+
+    let round2 = client
+        .get_active_round()
+        .expect("template round must be active");
+    assert_eq!(round2.round_id, next_round_id);
+    assert_eq!(round2.price_start, 4_0000000u128);
+    assert_eq!(round2.mode, RoundMode::UpDown);
+}
+
+/// A cleared template can no longer be used to create the next round, even
+/// after a settle/cancel that would otherwise permit it.
+#[test]
+fn test_create_next_from_template_after_clear_fails() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    client.set_round_template(&1_0000000u128, &None);
+    client.create_round(&1_0000000u128, &None);
+    client.cancel_round(&1u32);
+    client.clear_round_template();
+
+    let result = client.try_create_next_from_template();
+    assert_eq!(result, Err(Ok(ContractError::CommitmentNotFound)));
+    assert_eq!(client.get_active_round(), None);
 }

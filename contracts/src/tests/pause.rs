@@ -17,6 +17,7 @@ fn setup_contract(env: &Env) -> (VirtualTokenContractClient<'_>, Address, Addres
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     (client, contract_id, admin, oracle)
 }
@@ -47,6 +48,7 @@ fn test_pause_requires_admin_auth() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     env.mock_auths(&[MockAuth {
         address: &attacker,
@@ -100,7 +102,8 @@ fn test_mutations_fail_while_paused() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     assert_eq!(resolve_result, Err(Ok(ContractError::ContractPaused)));
 
     client.unpause_contract();
@@ -123,7 +126,7 @@ fn test_protocol_health_paused() {
 #[test]
 fn test_protocol_health_not_paused_healthy() {
     let env = Env::default();
-    let (client, contract_id, _admin, oracle) = setup_contract(&env);
+    let (client, _contract_id, _admin, _oracle) = setup_contract(&env);
     let user = Address::generate(&env);
 
     // With oracle heartbeat active + no active round → NO_ACTIVE_ROUND

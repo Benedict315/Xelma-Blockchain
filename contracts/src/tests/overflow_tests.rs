@@ -11,7 +11,7 @@
 use super::config_helpers::apply_max_pending_winnings;
 use crate::contract::{VirtualTokenContract, VirtualTokenContractClient};
 use crate::errors::ContractError;
-use crate::types::{BetSide, DataKey, OraclePayload};
+use crate::types::{BetSide, DataKeyCore, DataKeyScoped, OraclePayload};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Env,
@@ -45,7 +45,8 @@ fn resolve_updown(
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 }
 
 // ─── happy-path regression ───────────────────────────────────────────────────
@@ -60,6 +61,7 @@ fn test_claim_winnings_happy_path() {
     let bob = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice); // 1_000_0000000
     client.mint_initial(&bob); //  1_000_0000000
 
@@ -91,11 +93,12 @@ fn test_claim_winnings_overflow_returns_payout_overflow() {
     let user = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user); // sets balance to 1_000_0000000
 
     // Inject i128::MAX as pending winnings directly into storage
     env.as_contract(&contract_id, || {
-        let key = DataKey::PendingWinnings(user.clone());
+        let key = DataKeyScoped::PendingWinnings(user.clone());
         env.storage().persistent().set(&key, &i128::MAX);
     });
 
@@ -117,12 +120,13 @@ fn test_claim_winnings_overflow_balance_at_max() {
     let user = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Set balance to i128::MAX directly
     env.as_contract(&contract_id, || {
-        let bal_key = DataKey::Balance(user.clone());
+        let bal_key = DataKeyScoped::Balance(user.clone());
         env.storage().persistent().set(&bal_key, &i128::MAX);
-        let win_key = DataKey::PendingWinnings(user.clone());
+        let win_key = DataKeyScoped::PendingWinnings(user.clone());
         env.storage().persistent().set(&win_key, &1i128);
     });
 
@@ -147,6 +151,7 @@ fn test_record_winnings_mul_overflow_returns_payout_overflow() {
     let alice = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000u128, &None);
@@ -159,12 +164,12 @@ fn test_record_winnings_mul_overflow_returns_payout_overflow() {
         let mut round: crate::types::Round = env
             .storage()
             .persistent()
-            .get(&DataKey::ActiveRound)
+            .get(&DataKeyCore::ActiveRound)
             .unwrap();
         round.pool_down = i128::MAX; // causes payout_mul overflow
         env.storage()
             .persistent()
-            .set(&DataKey::ActiveRound, &round);
+            .set(&DataKeyCore::ActiveRound, &round);
     });
 
     env.ledger().with_mut(|li| li.sequence_number = 12);
@@ -177,7 +182,8 @@ fn test_record_winnings_mul_overflow_returns_payout_overflow() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert_eq!(result, Err(Ok(ContractError::PayoutOverflow)));
 }
@@ -193,6 +199,7 @@ fn test_record_refunds_overflow_returns_payout_overflow() {
     let alice = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     client.create_round(&1_0000000u128, &None);
@@ -200,7 +207,7 @@ fn test_record_refunds_overflow_returns_payout_overflow() {
 
     // Inject near-max existing pending winnings for alice
     env.as_contract(&contract_id, || {
-        let key = DataKey::PendingWinnings(alice.clone());
+        let key = DataKeyScoped::PendingWinnings(alice.clone());
         env.storage().persistent().set(&key, &(i128::MAX - 1));
     });
 
@@ -215,7 +222,8 @@ fn test_record_refunds_overflow_returns_payout_overflow() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert_eq!(result, Err(Ok(ContractError::PayoutOverflow)));
 }
@@ -231,10 +239,11 @@ fn test_claim_winnings_near_max_succeeds() {
     let user = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // balance = 0, pending = i128::MAX  → new_balance = i128::MAX (no overflow)
     env.as_contract(&contract_id, || {
-        let win_key = DataKey::PendingWinnings(user.clone());
+        let win_key = DataKeyScoped::PendingWinnings(user.clone());
         env.storage().persistent().set(&win_key, &i128::MAX);
     });
 
@@ -242,6 +251,122 @@ fn test_claim_winnings_near_max_succeeds() {
     assert_eq!(claimed, i128::MAX);
     assert_eq!(client.balance(&user), i128::MAX);
     assert_eq!(client.get_pending_winnings(&user), 0);
+}
+
+// ─── claim_winnings boundary: balance + pending = i128::MAX exactly (non-zero balance) ──
+
+/// balance = i128::MAX - 100, pending = 100 → new_balance = i128::MAX (boundary, no overflow).
+/// Verifies that the maximum valid i128 value can be reached via claim without overflow.
+#[test]
+fn test_claim_winnings_boundary_max_exact() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    env.as_contract(&contract_id, || {
+        let bal_key = DataKeyScoped::Balance(user.clone());
+        env.storage()
+            .persistent()
+            .set(&bal_key, &(i128::MAX - 100));
+        let win_key = DataKeyScoped::PendingWinnings(user.clone());
+        env.storage().persistent().set(&win_key, &100i128);
+    });
+
+    let claimed = client.claim_winnings(&user);
+    assert_eq!(claimed, 100);
+    assert_eq!(client.balance(&user), i128::MAX);
+    assert_eq!(client.get_pending_winnings(&user), 0);
+}
+
+// ─── claim_winnings boundary: balance + pending = i128::MAX (zero balance) ──
+
+/// balance = 0, pending = i128::MAX - 1 → new_balance = i128::MAX - 1 (boundary).
+#[test]
+fn test_claim_winnings_boundary_max_minus_one() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    env.as_contract(&contract_id, || {
+        let win_key = DataKeyScoped::PendingWinnings(user.clone());
+        env.storage()
+            .persistent()
+            .set(&win_key, &(i128::MAX - 1));
+    });
+
+    let claimed = client.claim_winnings(&user);
+    assert_eq!(claimed, i128::MAX - 1);
+    assert_eq!(client.balance(&user), i128::MAX - 1);
+    assert_eq!(client.get_pending_winnings(&user), 0);
+}
+
+// ─── claim_winnings idempotency: repeat claim after successful claim returns 0 ──
+
+/// After a successful claim, any subsequent claim must return 0 and leave state unchanged.
+#[test]
+fn test_claim_winnings_repeat_idempotent() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+
+    client.create_round(&1_0000000u128, &None);
+    client.place_bet(&user, &100_0000000, &BetSide::Up);
+
+    resolve_updown(&env, &client, &contract_id, 2_0000000, 12);
+
+    // First claim succeeds
+    let first = client.claim_winnings(&user);
+    assert!(first > 0, "first claim should return non-zero");
+    let bal_after_first = client.balance(&user);
+
+    // Second claim returns 0, balance unchanged
+    let second = client.claim_winnings(&user);
+    assert_eq!(second, 0, "repeat claim must return 0");
+    assert_eq!(
+        client.balance(&user),
+        bal_after_first,
+        "balance unchanged on repeat claim"
+    );
+    assert_eq!(
+        client.get_pending_winnings(&user),
+        0,
+        "pending remains 0 after repeat claim"
+    );
+}
+
+// ─── claim_winnings zero-pending: early return before any state mutation ──
+
+/// Calling claim_winnings with no pending winnings returns 0 without modifying storage.
+#[test]
+fn test_claim_winnings_zero_pending_no_mutation() {
+    let (env, _contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user);
+
+    let bal_before = client.balance(&user);
+    let claimed = client.claim_winnings(&user);
+
+    assert_eq!(claimed, 0, "zero pending must return 0");
+    assert_eq!(client.balance(&user), bal_before, "balance unchanged");
+    assert_eq!(client.get_pending_winnings(&user), 0, "pending stays 0");
 }
 
 // ─── Pending winnings cap tests (Issue #120) ─────────────────────────────────
@@ -254,6 +379,7 @@ fn test_pending_winnings_cap_enforced_on_refund() {
     let alice = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
 
     // Set cap to 50
@@ -273,7 +399,8 @@ fn test_pending_winnings_cap_enforced_on_refund() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     assert_eq!(result, Err(Ok(ContractError::PendingWinningsCapExceeded)));
 
     // Balance unchanged — all-or-nothing guarantee
@@ -289,6 +416,7 @@ fn test_pending_winnings_cap_enforced_on_winnings() {
     let bob = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -310,7 +438,8 @@ fn test_pending_winnings_cap_enforced_on_winnings() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     assert_eq!(result, Err(Ok(ContractError::PendingWinningsCapExceeded)));
 }
 
@@ -323,6 +452,7 @@ fn test_pending_winnings_cap_not_exceeded_succeeds() {
     let bob = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -349,6 +479,7 @@ fn test_pending_winnings_cap_disabled_large_payout_succeeds() {
     let bob = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&alice);
     client.mint_initial(&bob);
 
@@ -374,6 +505,7 @@ fn test_get_max_pending_winnings_returns_configured_value() {
     let oracle = Address::generate(&env);
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     assert_eq!(client.get_max_pending_winnings(), None);
     apply_max_pending_winnings(&env, &client, Some(500_0000000i128));

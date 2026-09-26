@@ -41,10 +41,10 @@ Read-only functions (`get_*`, `is_*`, `balance`) are excluded.
 | 6 | `place_bet` | user | Schema OK, not paused, amount > 0, max stake, max exposure, mode == UpDown, bet window open, balance sufficient, no duplicate | Write balance, Position, RoundParticipants, ActiveRound (pool totals) | Emit `(bet, placed)` | PASS | |
 | 7 | `place_precision_prediction` | user | Schema OK, not paused, amount > 0, max stake, price scale, max exposure, mode == Precision, bet window open, participant cap, balance sufficient, no duplicate | Write balance, PrecisionPosition, RoundParticipants | Emit `(predict, price)` | PASS | |
 | 8 | `predict_price` | user | (delegates to `place_precision_prediction`) | (same as above) | (same as above) | PASS | Thin alias |
-| 9 | `commit_prediction` | user | Not paused, amount > 0, max stake, max exposure, mode == Precision, bet window open, balance sufficient, no duplicate | Write balance, PrecisionCommitment, RoundParticipants | Emit `(commit, predict)` | PASS | |
-| 10 | `reveal_prediction` | user | Not paused, mode == Precision, reveal window open, commitment exists, not already revealed, hash matches | Write commitment.revealed=true, PrecisionPosition | Emit `(reveal, predict)` | PASS | Hash verified before any write |
-| 11 | `resolve_round` | oracle | Schema OK, price != 0, not paused, active round exists, round_id matches, network_id matches, contract_addr matches, timestamp not future, not stale, deviation check, nonce not consumed, round has ended | Write ConsumedOracleNonce, OracleDeviationOverrideArmed (remove), pending winnings (N users), archived round, cleanup (N positions + participants + ActiveRound) | Emit `(round, resolved)` or `(round, fallback)` or `(pool, onesided)` | PASS | Nonce is consumed (Effect) after all validation Checks but before winner accounting begins |
-| 12 | `cancel_round` | admin | Schema OK, active round exists | Write pending winnings (refunds), archived round, RoundParticipants (remove), CancelledRound=true, ActiveRound (remove) | Emit `(round, cancelled)` | PASS | All state mutations complete before event |
+| 9 | `commit_prediction` | user | Not paused, non-zero commitment hash, amount > 0, max stake, max exposure, mode == Precision, bet window open, balance sufficient, no duplicate | Write balance, PrecisionCommitment, RoundParticipants | Emit `(commit, predict)` | PASS | All-zero hash → `InvalidCommitment` before writes |
+| 10 | `reveal_prediction` | user | Not paused, salt entropy OK, mode == Precision, reveal window open, commitment exists, not already revealed, hash matches | Write commitment.revealed=true, PrecisionPosition | Emit `(reveal, predict)` | PASS | Weak salt → `InvalidSalt`; hash verified before any write |
+| 11 | `resolve_round` | oracle | Schema OK, price != 0, not paused, active round exists, round_id matches, network_id matches, contract_addr matches, timestamp not future, not stale, deviation check, nonce not consumed, round has ended | Write ConsumedOracleNonce, OracleDeviationOverrideArmed (remove), pending winnings (N users), archived round, cleanup (N positions + participants + ActiveRound) | Emit `(round, summary)` or `(pool, onesided)` | PASS | Nonce is consumed (Effect) after all validation Checks but before winner accounting begins |
+| 12 | `cancel_round` | admin | Schema OK, active round exists | Write pending winnings (refunds), archived round, RoundParticipants (remove), CancelledRound=true, ActiveRound (remove) | Emit `(round, summary)` | PASS | All state mutations complete before event |
 | 13 | `claim_winnings` | user | Schema OK, not paused, pending > 0 | Remove PendingWinnings key, write new balance | Emit `(claim, winnings)` | PASS (fixed) | **CEI fix applied**: pending winnings slot now removed before balance is increased. See SR-2026-06-001. |
 | 14 | `arm_oracle_deviation_override` | admin | Admin set, not paused | Write OracleDeviationOverrideArmed=true | None | PASS | No interaction after effect |
 | 15 | `update_oracle_heartbeat` | oracle | Schema OK, status <= 2, oracle set | Write OracleHeartbeat record | Emit `(oracle, heartbeat)` | PASS | |
@@ -75,19 +75,12 @@ Read-only functions (`get_*`, `is_*`, `balance`) are excluded.
 
 ## Violations Fixed
 
-### SR-2026-06-001 — `claim_winnings`: Effect ordering (Low, Mitigated)
+### SR-2026-06-001 — `claim_winnings`: Effect ordering (Low, Mitigated → Hardened #260)
 
-**Before fix:**
-```rust
-// EFFECT: balance increased
-Self::_set_balance(&env, user.clone(), new_balance);
-// EFFECT: pending winnings slot removed (too late — state temporarily inconsistent)
-env.storage().persistent().remove(&key);
-// INTERACTION: event
-env.events().publish(...);
-```
+**Original issue:** Before the CEI fix, the balance was credited *before* the pending
+winnings slot was removed, leaving a window where state was temporarily inconsistent.
 
-**After fix (CEI-correct):**
+**After first fix (issue #195):**
 ```rust
 // EFFECT: remove the claim slot FIRST (prevents double-claim in future cross-contract paths)
 env.storage().persistent().remove(&key);
@@ -97,7 +90,60 @@ Self::_set_balance(&env, user.clone(), new_balance);
 env.events().publish(...);
 ```
 
-**Risk level:** Low. Soroban's execution model does not currently support reentrancy within a single invocation, but ordering the removal of the claim slot before crediting the balance is the strictly correct CEI ordering and future-proofs the code against cross-contract interaction paths.
+**After hardening (issue #260):**
+```rust
+// ── Checks ────────────────────────────────────────────────────────────
+_require_supported_schema(&env)?;
+user.require_auth();
+_ensure_not_paused(&env)?;  // rejects FullyPaused; allows Normal & ClaimsOnly
+
+let key = DataKey::PendingWinnings(user.clone());
+let pending: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+
+if pending == 0 { return Ok(0); }  // idempotent zero-pending fast path
+
+let current_balance = balance(env.clone(), user.clone());
+let new_balance = payout_add(current_balance, pending)?;  // overflow guard
+
+// ── Effects ───────────────────────────────────────────────────────────
+// 1. Remove the pending-winnings claim slot FIRST (prevent double-claim).
+env.storage().persistent().remove(&key);
+
+// 2. Credit the user balance only after the claim slot is cleared.
+_set_balance(&env, user.clone(), new_balance);
+
+// ── Interactions ──────────────────────────────────────────────────────
+// Structured event: (user, amount_claimed, balance_before, balance_after)
+env.events().publish(
+    (symbol_short!("claim"), symbol_short!("winnings")),
+    (user.clone(), pending, current_balance, new_balance),
+);
+```
+
+**Key improvements in the hardened version (Issue #260):**
+
+1. **Inline CEI documentation** — Every block (`Checks`, `Effects`, `Interactions`) is
+   explicitly commented so reviewers can verify ordering at a glance.
+
+2. **Richer structured event** — The event now emits the full 4-tuple
+   `(user, amount_claimed, balance_before, balance_after)` so indexers can
+   reconstruct the exact state transition without an extra balance read.
+
+3. **Overflow-proof arithmetic** — `payout_add(current_balance, pending)` returns
+   `PayoutOverflow` if the sum exceeds `i128::MAX`. No storage writes occur on
+   overflow (all-or-nothing guarantee). Tested with:
+   - `balance + pending` at the exact boundary `i128::MAX` (succeeds)
+   - `balance + pending` at `i128::MAX + 1` (returns `PayoutOverflow`)
+   - `i128::MAX + 0` = `i128::MAX` (succeeds with zero balance)
+   - Repeat idempotency after a successful claim
+
+4. **Mode compatibility** — The function uses `_ensure_not_paused()` which allows
+   `Normal` (0) and `ClaimsOnly` (1) modes while rejecting `FullyPaused` (2).
+
+**Risk level:** Low. Soroban's execution model does not currently support reentrancy
+within a single invocation, but ordering the removal of the claim slot before crediting
+the balance is the strictly correct CEI ordering and future-proofs the code against
+cross-contract interaction paths.
 
 ---
 
@@ -125,14 +171,37 @@ env.events().publish((symbol_short!("config"), symbol_short!("cancelled")), (kin
 
 ---
 
-## Tests Added
+## Tests (Updated for Issue #260 Hardening)
 
-Two regression tests were added to `contracts/src/tests/cei_ordering.rs` to verify the corrected orderings:
+### CEI Ordering Tests (`contracts/src/tests/cei_ordering.rs`)
 
 | Test | Entrypoint | What it verifies |
 |---|---|---|
-| `test_claim_winnings_cei_pending_cleared_before_balance` | `claim_winnings` | After a successful claim, the `PendingWinnings` slot is absent and balance reflects the credited amount |
+| `test_claim_winnings_cei_pending_cleared_after_claim` | `claim_winnings` | After a successful claim, the `PendingWinnings` slot is absent, balance reflects the credited amount, AND the structured event contains `(user, amount, balance_before, balance_after)` |
 | `test_cancel_config_change_cei_key_removed_before_event` | `cancel_config_change` | After cancellation, the `PendingConfigChange` key is absent, and a second cancellation attempt fails with `CommitmentNotFound` |
+| `test_cancel_config_change_rejected_after_activation` | `cancel_config_change` | Cancellation is rejected once the activation ledger is reached |
+| `test_claim_winnings_respects_runtime_mode` | `claim_winnings` | Claim succeeds in Normal and ClaimsOnly modes; rejected with `ContractPaused` in FullyPaused mode |
+
+### Overflow Tests (`contracts/src/tests/overflow_tests.rs`)
+
+| Test | What it verifies |
+|---|---|
+| `test_claim_winnings_happy_path` | Normal claim: pending winnings accumulate correctly, no overflow |
+| `test_claim_winnings_overflow_returns_payout_overflow` | `pending = i128::MAX + balance = 1_000_0000000` → `PayoutOverflow`, storage unchanged |
+| `test_claim_winnings_overflow_balance_at_max` | `balance = i128::MAX + pending = 1` → `PayoutOverflow`, storage unchanged |
+| `test_claim_winnings_near_max_succeeds` | `balance = 0 + pending = i128::MAX` → success (boundary, no overflow) |
+| `test_claim_winnings_boundary_max_exact` | `balance = i128::MAX - 100 + pending = 100` → success (exact i128::MAX) |
+| `test_claim_winnings_boundary_max_minus_one` | `balance = 0 + pending = i128::MAX - 1` → success (i128::MAX - 1) |
+| `test_claim_winnings_repeat_idempotent` | Second claim after successful claim returns 0, state unchanged |
+| `test_claim_winnings_zero_pending_no_mutation` | Claim with zero pending returns 0 without any storage writes |
+| `test_record_winnings_mul_overflow_returns_payout_overflow` | `amount * losing_pool` overflows → `PayoutOverflow` |
+| `test_record_refunds_overflow_returns_payout_overflow` | Existing pending + refund overflows → `PayoutOverflow` |
+
+### Event Coverage Tests (`contracts/src/tests/event_coverage.rs`)
+
+| Test | What it verifies |
+|---|---|
+| `test_event_coverage_claim_winnings` | Updated to validate the 4-element structured event `(user, amount, balance_before, balance_after)` |
 
 ---
 

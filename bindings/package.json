@@ -3,7 +3,10 @@
   "version": "1.1.0",
   "description": "TypeScript bindings for the Xelma on-chain prediction market smart contract",
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./helpers": "./dist/helpers.js"
+  },
   "typings": "dist/index.d.ts",
   "repository": {
     "type": "git",
@@ -12,11 +15,13 @@
   "author": "TevaLabs",
   "license": "MIT",
   "scripts": {
-    "build": "./node_modules/.bin/tsc",
-    "lint": "./node_modules/.bin/tsc --noEmit",
+    "build": "tsc",
+    "lint": "tsc --noEmit",
     "test:parity": "node src/parity.js",
-    "test:errors": "node tests/contract-error-parity.test.js",
+    "test:errors": "vitest run tests/contract-error-parity.test.js",
     "test:wasm": "vitest run tests/wasm-parity.test.js",
+    "test:vitest": "vitest run",
+    "test:integration": "vitest run tests/integration.test.ts",
     "prepublishOnly": "npm run build && npm run test:parity && npm run test:errors"
   },
   "dependencies": {

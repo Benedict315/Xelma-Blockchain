@@ -26,6 +26,7 @@ fn test_set_windows_admin_only() {
 
     // Initialize contract
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Admin can set windows
     client.set_windows(&10, &20);
@@ -55,6 +56,7 @@ fn test_set_windows_fails_without_admin_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Attempting to set windows without admin auth
     let result = client.try_set_windows(&10, &20);
@@ -73,6 +75,7 @@ fn test_set_windows_fails_with_wrong_auth() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // We only provide auth for malicious_user, but the contract expects admin auth
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -101,6 +104,7 @@ fn test_set_windows_positive_values() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Zero values should fail
     let result = client.try_set_windows(&0, &12);
@@ -125,6 +129,7 @@ fn test_set_windows_bet_must_be_less_than_run() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // bet_ledgers >= run_ledgers should fail
     let result = client.try_set_windows(&12, &12);
@@ -148,6 +153,7 @@ fn test_set_windows_respects_max_bounds() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Inclusive max bounds are accepted.
     client.set_windows(&MAX_BET_WINDOW_LEDGERS, &MAX_RUN_WINDOW_LEDGERS);
@@ -171,6 +177,7 @@ fn test_set_windows_does_not_mutate_state_on_validation_failure() {
 
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     apply_windows(&env, &client, 20, 40);
 
     let result = client.try_set_windows(&41, &40);
@@ -180,6 +187,189 @@ fn test_set_windows_does_not_mutate_state_on_validation_failure() {
     let round = client.get_active_round().expect("Round should exist");
     assert_eq!(round.bet_end_ledger, 20);
     assert_eq!(round.end_ledger, 40);
+}
+
+#[test]
+fn test_set_close_buffer_ledgers_rejects_out_of_range() {
+    let env = Env::default();
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+
+    let result = client.try_set_close_buffer_ledgers(&(MAX_BET_WINDOW_LEDGERS + 1));
+    assert_eq!(result, Err(Ok(ContractError::WindowOutOfRange)));
+}
+
+#[test]
+fn test_close_buffer_rejects_bets_in_final_window() {
+    let env = Env::default();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+    });
+
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
+    client.mint_initial(&user_a);
+    client.mint_initial(&user_b);
+
+    apply_windows(&env, &client, 6, 12);
+    client.set_close_buffer_ledgers(&2);
+    client.create_round(&1_0000000, &None);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 3;
+    });
+    client.place_bet(&user_a, &50_0000000, &BetSide::Up);
+
+    // Close buffer freezes at ledger 4 (bet_end=6, close_buffer=2)
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 4;
+    });
+    let result = client.try_place_bet(&user_b, &50_0000000, &BetSide::Down);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+
+    // At bet_end_ledger, the error should be RoundEnded
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 6;
+    });
+    let result = client.try_place_bet(&user_b, &50_0000000, &BetSide::Down);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+}
+
+#[test]
+fn test_close_buffer_distinct_error_boundary() {
+    let env = Env::default();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+    });
+
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&user_a);
+    client.mint_initial(&user_b);
+    client.mint_initial(&user_c);
+
+    // bet_end=6, close_buffer=3, close_ledger=3
+    apply_windows(&env, &client, 6, 12);
+    client.set_close_buffer_ledgers(&3);
+    client.create_round(&1_0000000, &None);
+
+    // Ledger 2: before close buffer — bets accepted
+    env.ledger().with_mut(|li| li.sequence_number = 2);
+    client.place_bet(&user_a, &50_0000000, &BetSide::Up);
+
+    // Ledger 3: at close buffer edge — BettingClosed
+    env.ledger().with_mut(|li| li.sequence_number = 3);
+    let result = client.try_place_bet(&user_b, &50_0000000, &BetSide::Down);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+
+    // Ledger 5: still in buffer zone — BettingClosed
+    env.ledger().with_mut(|li| li.sequence_number = 5);
+    let result = client.try_place_bet(&user_b, &50_0000000, &BetSide::Down);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+
+    // Ledger 6: at bet_end_ledger — RoundEnded
+    env.ledger().with_mut(|li| li.sequence_number = 6);
+    let result = client.try_place_bet(&user_c, &50_0000000, &BetSide::Down);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+}
+
+#[test]
+fn test_close_buffer_precision_prediction_distinct_error() {
+    let env = Env::default();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+    });
+
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&user);
+
+    apply_windows(&env, &client, 6, 12);
+    client.set_close_buffer_ledgers(&2);
+    client.create_round(&1_0000000, &Some(1));
+
+    // Ledger 4: close buffer freezes — BettingClosed for precision
+    env.ledger().with_mut(|li| li.sequence_number = 4);
+    let result = client.try_place_precision_prediction(&user, &50_0000000, &2297);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+
+    // Ledger 6: bet window ended — RoundEnded
+    env.ledger().with_mut(|li| li.sequence_number = 6);
+    let result = client.try_place_precision_prediction(&user, &50_0000000, &2297);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+}
+
+#[test]
+fn test_close_buffer_commit_prediction_distinct_error() {
+    use soroban_sdk::BytesN;
+
+    let env = Env::default();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 0;
+    });
+
+    let contract_id = env.register(VirtualTokenContract, ());
+    let client = VirtualTokenContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &oracle);
+    client.mint_initial(&user);
+
+    apply_windows(&env, &client, 6, 12);
+    client.set_close_buffer_ledgers(&2);
+    client.create_round(&1_0000000, &Some(1));
+
+    let hash = BytesN::from_array(&env, &[7; 32]);
+
+    // Ledger 4: close buffer freezes — BettingClosed for commit
+    env.ledger().with_mut(|li| li.sequence_number = 4);
+    let result = client.try_commit_prediction(&user, &hash, &50_0000000);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
+
+    // Ledger 6: bet window ended — RoundEnded
+    env.ledger().with_mut(|li| li.sequence_number = 6);
+    let result = client.try_commit_prediction(&user, &hash, &50_0000000);
+    assert_eq!(result, Err(Ok(ContractError::RoundEnded)));
 }
 
 #[test]
@@ -198,6 +388,7 @@ fn test_create_round_uses_configured_windows() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Set custom windows
     apply_windows(&env, &client, 10, 20);
@@ -230,6 +421,7 @@ fn test_create_round_uses_default_windows() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Don't set custom windows, use defaults
     let start_price: u128 = 1_0000000;
@@ -260,6 +452,7 @@ fn test_betting_closes_at_bet_end_ledger() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Set windows: bet closes at ledger 6, round ends at ledger 12
@@ -306,6 +499,7 @@ fn test_resolution_only_allowed_after_run_ledgers() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Set windows: bet closes at ledger 6, round ends at ledger 12
@@ -330,7 +524,8 @@ fn test_resolution_only_allowed_after_run_ledgers() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
     assert_eq!(result, Err(Ok(ContractError::RoundNotEnded)));
 
     // Advance to end_ledger
@@ -346,7 +541,8 @@ fn test_resolution_only_allowed_after_run_ledgers() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     // Round should be cleared
     assert_eq!(client.get_active_round(), None);
@@ -369,6 +565,7 @@ fn test_precision_prediction_respects_bet_window() {
     env.mock_all_auths();
 
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.mint_initial(&user);
 
     // Set windows
@@ -412,6 +609,7 @@ fn test_place_precision_prediction_fails_without_user_auth() {
         },
     }]);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &user,
@@ -452,9 +650,10 @@ fn test_create_round_rejects_zero_start_price() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     let result = client.try_create_round(&0u128, &None);
-    assert_eq!(result, Err(Ok(ContractError::StartPriceTooLow)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidStartPrice)));
 }
 
 #[test]
@@ -467,10 +666,11 @@ fn test_create_round_rejects_price_above_max() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // MAX_START_PRICE = 1_000_000_000_000_000_000; one above must fail
     let result = client.try_create_round(&1_000_000_000_000_000_001u128, &None);
-    assert_eq!(result, Err(Ok(ContractError::StartPriceTooHigh)));
+    assert_eq!(result, Err(Ok(ContractError::InvalidStartPrice)));
 }
 
 #[test]
@@ -483,6 +683,7 @@ fn test_create_round_accepts_boundary_prices() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Minimum allowed price (1)
     client.create_round(&1u128, &None);
@@ -490,6 +691,12 @@ fn test_create_round_accepts_boundary_prices() {
 
     // Cancel to allow a second round
     client.cancel_round(&0u32);
+
+    // A ledger sequence backs at most one round (oracle payloads bind to
+    // `Round.start_ledger`), so advance before creating the replacement.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 1;
+    });
 
     // Maximum allowed price
     client.create_round(&1_000_000_000_000_000_000u128, &None);
@@ -506,6 +713,7 @@ fn test_get_round_phase_no_active_round() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     let result = client.try_get_round_phase();
     assert_eq!(result, Err(Ok(ContractError::NoActiveRound)));
@@ -525,6 +733,7 @@ fn test_get_round_phase_boundary_ledgers() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     apply_windows(&env, &client, 10, 20);
     client.create_round(&1_0000000u128, &None);
@@ -557,6 +766,7 @@ fn test_get_round_phase_default_windows() {
     let oracle = Address::generate(&env);
     env.mock_all_auths();
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
     client.create_round(&1_0000000u128, &None);
 
     // default: bet_end=56, end=62

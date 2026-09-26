@@ -1,17 +1,18 @@
-#!/usr/bin/env node
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import assert from "assert";
+import { describe, it, expect } from "vitest";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const errorsPath = path.resolve(__dirname, "../../contracts/src/errors.rs");
 const bindingsPath = path.resolve(__dirname, "../src/index.ts");
+const docsPath = path.resolve(__dirname, "../../docs/CONTRACT_ERRORS.md");
 
 const errorsCode = fs.readFileSync(errorsPath, "utf8");
 const bindingsCode = fs.readFileSync(bindingsPath, "utf8");
+const docsCode = fs.readFileSync(docsPath, "utf8");
 
 const rustVariants = [];
 for (const line of errorsCode.split("\n")) {
@@ -23,8 +24,7 @@ for (const line of errorsCode.split("\n")) {
 
 const tsMapMatch = bindingsCode.match(/export\s+const\s+ContractError\s*=\s*\{([\s\S]*)\}/);
 if (!tsMapMatch) {
-  console.error("Could not find ContractError map in bindings/src/index.ts");
-  process.exit(1);
+  throw new Error("Could not find ContractError map in bindings/src/index.ts");
 }
 
 const tsCodes = new Map();
@@ -35,37 +35,64 @@ while ((entry = tsEntryRegex.exec(tsMapMatch[1])) !== null) {
 }
 
 const rustCodes = new Map(rustVariants.map(v => [v.code, v.name]));
-
-const missingInTS = [];
-const extraInTS = [];
-const nameMismatches = [];
-
-for (const [code, name] of rustCodes) {
-  const tsName = tsCodes.get(code);
-  if (!tsName) {
-    missingInTS.push(`${code}: ${name}`);
-  } else if (tsName !== name) {
-    nameMismatches.push(`Code ${code}: Rust name is "${name}", TS name is "${tsName}"`);
+const docsCodes = new Map();
+for (const line of docsCode.split("\n")) {
+  const match = line.match(/^\|\s*(\d+)\s*\|\s*`?(\w+)`?\s*\|/);
+  if (match) {
+    docsCodes.set(parseInt(match[1], 10), match[2]);
   }
 }
 
-for (const [code, name] of tsCodes) {
-  if (!rustCodes.has(code)) {
-    extraInTS.push(`${code}: ${name}`);
-  }
-}
+describe("Contract Error Parity", () => {
+  it("maps AccessDenied to its stable contract code", () => {
+    expect(rustCodes.get(79)).toBe("AccessDenied");
+    expect(tsCodes.get(79)).toBe("AccessDenied");
+  });
 
-assert.strictEqual(missingInTS.length, 0, `Missing error codes in TS: ${missingInTS.join(", ")}`);
-assert.strictEqual(extraInTS.length, 0, `Extra error codes in TS (not in Rust): ${extraInTS.join(", ")}`);
-assert.strictEqual(nameMismatches.length, 0, `Error name mismatches: ${nameMismatches.join("; ")}`);
+  it("has no missing error codes in TS", () => {
+    const missingInTS = [];
+    for (const [code, name] of rustCodes) {
+      const tsName = tsCodes.get(code);
+      if (!tsName) {
+        missingInTS.push(`${code}: ${name}`);
+      }
+    }
+    expect(missingInTS).toEqual([]);
+  });
 
-assert(
-  bindingsCode.includes("export function decodeContractError"),
-  "decodeContractError helper is missing from bindings"
-);
-assert(
-  bindingsCode.includes("export function formatContractError"),
-  "formatContractError helper is missing from bindings"
-);
+  it("has no extra error codes in TS", () => {
+    const extraInTS = [];
+    for (const [code, name] of tsCodes) {
+      if (!rustCodes.has(code)) {
+        extraInTS.push(`${code}: ${name}`);
+      }
+    }
+    expect(extraInTS).toEqual([]);
+  });
 
-console.log(`✅ Error code parity check passed: ${rustCodes.size} variants mapped correctly.`);
+  it("has no error name mismatches", () => {
+    const nameMismatches = [];
+    for (const [code, name] of rustCodes) {
+      const tsName = tsCodes.get(code);
+      if (tsName && tsName !== name) {
+        nameMismatches.push(`Code ${code}: Rust name is "${name}", TS name is "${tsName}"`);
+      }
+    }
+    expect(nameMismatches).toEqual([]);
+  });
+
+  it("keeps the documented registry identical to Rust", () => {
+    const byCode = ([left], [right]) => left - right;
+    expect([...docsCodes.entries()].sort(byCode)).toEqual(
+      [...rustCodes.entries()].sort(byCode)
+    );
+  });
+
+  it("contains decodeContractError helper", () => {
+    expect(bindingsCode.includes("export function decodeContractError")).toBe(true);
+  });
+
+  it("contains formatContractError helper", () => {
+    expect(bindingsCode.includes("export function formatContractError")).toBe(true);
+  });
+});

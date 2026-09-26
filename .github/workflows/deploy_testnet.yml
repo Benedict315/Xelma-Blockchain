@@ -29,7 +29,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -97,5 +97,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deployed-wasm
-          path: target/wasm32-unknown-unknown/release/xelma_contract.wasm
+          path: target/wasm32v1-none/release/xelma_contract.wasm
           retention-days: 7
+
+      - name: Deployment Summary & Runbook Link
+        if: always()
+        run: |
+          echo "### 🚀 Deployment Summary & Checklist" >> $GITHUB_STEP_SUMMARY
+          echo "Mode: **${{ github.event.inputs.dry_run == 'true' && 'DRY RUN' || 'DEPLOY' }}**" >> $GITHUB_STEP_SUMMARY
+          echo "Refer to [docs/DEPLOYMENT_RUNBOOK.md](https://github.com/TevaLabs/Xelma-Blockchain/blob/main/docs/DEPLOYMENT_RUNBOOK.md) for post-deployment initialization, health checks, and incident response playbook." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "round_id": 1004,
+  "mode": "precision",
+  "terminal": "void",
+  "price_start": 15000000,
+  "final_price": 16000000,
+  "pool_up": 0,
+  "pool_down": 0,
+  "fee_bps": 100,
+  "min_participants": null,
+  "participant_count": 2,
+  "oracle": {
+    "price": 16000000,
+    "timestamp": 1700000300,
+    "round_id": 1004,
+    "nonce": 2
+  },
+  "participants": [
+    {
+      "index": 0,
+      "amount": 50,
+      "revealed": true,
+      "predicted_price": 15500000
+    },
+    {
+      "index": 1,
+      "amount": 50,
+      "revealed": true,
+      "predicted_price": 16500000
+    }
+  ],
+  "expected": {
+    "archive_status": "voided",
+    "total_fee": 0,
+    "payouts": [
+      { "index": 0, "payout": 50, "outcome": "void" },
+      { "index": 1, "payout": 50, "outcome": "void" }
+    ]
+  }
+}

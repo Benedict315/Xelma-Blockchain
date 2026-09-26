@@ -1,5 +1,91 @@
 # Migration Notes
 
+## Dry-run mode (Schema v3+)
+
+**Introduced in:** `feat/292-upgradeability-migration-dry-run-next-schema-template`
+
+Every migration entrypoint accepts a `dry_run: bool` parameter. When `true`:
+
+- All validation checks run (admin auth, paused guard, active round guard, source version match)
+- No storage writes or event emissions occur
+- Returns `Ok(())` on success, `Err` on any validation failure
+
+This allows operators to confirm a migration would succeed before committing to it:
+
+```rust
+// Preview — no writes
+client.migrate_schema_v1_to_v2(true);
+// Real migration
+client.migrate_schema_v1_to_v2(false);
+```
+
+### Active round guard
+
+Migrations are **always** blocked while a round is active, even in dry-run mode:
+
+```rust
+// Both fail with MigrationActiveRound if a round is live
+client.migrate_schema_v1_to_v2(true);
+client.migrate_schema_v1_to_v2(false);
+```
+
+### Checklist
+
+1. **Dry-run the migration first**
+   ```rust
+   client.migrate_schema_v2_to_v3(true);
+   // If Ok(()), the real migration will pass validation.
+   ```
+
+2. **Run the real migration**
+   ```rust
+   client.migrate_schema_v2_to_v3(false);
+   ```
+
+3. **Verify schema version**
+   ```rust
+   assert_eq!(client.get_schema_version(), 3u32);
+   ```
+
+## V-Next schema template (Schema v3+)
+
+**Introduced in:** `feat/292-upgradeability-migration-dry-run-next-schema-template`
+
+Admins may announce a planned future schema version via `announce_next_schema`:
+
+```rust
+// Announce that v4 is the next planned migration
+client.announce_next_schema(4);
+```
+
+This writes the target version to a dedicated storage slot
+(`DataKey::NextSchemaVersion`) and emits `("schema", "next_ann")` with
+`(current_version, target_version)`.
+
+The announced version is purely informational — it does not change the active
+schema version or gate any entrypoints. Operators and monitoring dashboards
+can inspect it:
+
+```rust
+let next = client.get_next_schema(); // Some(4)
+```
+
+To clear the announcement before the migration executes:
+
+```rust
+client.clear_next_schema();
+assert_eq!(client.get_next_schema(), None);
+```
+
+### Validation rules
+
+| rule | behaviour |
+|------|-----------|
+| `target_version == 0` | rejected (`UnsupportedSchemaVersion`) |
+| `target_version <= CURRENT_SCHEMA_VERSION` | rejected (`UnsupportedSchemaVersion`) |
+| Admin authentication | required |
+| Clear when not set | rejected (`UnsupportedSchemaVersion`) |
+
 ## Schema v2 → v3: add per-user archived round outcome records
 
 **Introduced in:** `fix/migration-v2-to-v3`

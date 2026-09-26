@@ -63,10 +63,10 @@ suitable for wallet UX.
 import { decodeContractError, formatContractError } from "bindings"
 
 // Structured result for programmatic handling
-const decoded = decodeContractError(4)
+const decoded = decodeContractError(79)
 if (decoded) {
   console.log(`Error ${decoded.code}: ${decoded.variant} — ${decoded.message}`)
-  // => "Error 4: UnauthorizedAdmin — UnauthorizedAdmin"
+  // => "Error 79: AccessDenied — AccessDenied"
 }
 
 // One-liner for display in a wallet or bot
@@ -77,3 +77,101 @@ console.log(formatContractError(9) ?? "Unknown error")
 Use `decodeContractError` to surface contextual information in your wallet or
 bot, and fall back to `"Unknown contract error (code N)"` for codes that the
 current bindings do not yet recognise.
+
+# High-level helpers
+
+The `@xelma/bindings/helpers` module provides typed convenience wrappers
+around the generated client for common wallet flows.
+
+## `mintIfNeeded`
+
+Checks a user's vXLM balance and mints initial tokens if the balance is zero.
+One-time per user (enforced by the contract).
+
+```ts
+import { mintIfNeeded } from "@xelma/bindings/helpers"
+
+const { minted, balance } = await mintIfNeeded(client, "GABCDEF123...")
+if (minted) {
+  console.log(`Minted initial tokens. Balance: ${balance}`)
+}
+```
+
+## `placeBetChecked`
+
+Places a bet after running pre-flight validation:
+1. Contract is not paused
+2. An active round exists
+3. User has sufficient balance
+
+Throws typed exceptions for known failure modes.
+
+```ts
+import { placeBetChecked } from "@xelma/bindings/helpers"
+
+try {
+  const tx = await placeBetChecked(client, {
+    user: "GABCDEF123...",
+    amount: 500_000_000n,   // 50 vXLM (7-digit precision)
+    side: { tag: "Up", values: undefined },
+  })
+  console.log("Bet placed!")
+} catch (err) {
+  if (err instanceof ContractPausedError) {
+    console.log("Betting is paused right now.")
+  } else if (err instanceof InsufficientBalanceError) {
+    console.log("Not enough vXLM — try minting first.")
+  } else if (err instanceof NoActiveRoundError) {
+    console.log("No round is currently active.")
+  } else {
+    console.error("Unexpected error:", err)
+  }
+}
+```
+
+## `claimIfPending`
+
+Checks for pending winnings and claims them if any exist.
+
+```ts
+import { claimIfPending } from "@xelma/bindings/helpers"
+
+const { claimed, amount } = await claimIfPending(client, "GABCDEF123...")
+if (claimed) {
+  console.log(`Claimed ${amount} vXLM`)
+}
+```
+
+## `simulateBet`
+
+Simulates a bet without broadcasting to estimate resource fees and decode errors.
+
+```ts
+import { simulateBet } from "@xelma/bindings/helpers"
+
+const { simulated, minResourceFee, error } = await simulateBet(client, {
+  user: "GABCDEF123...",
+  amount: 500_000_000n,
+  side: { tag: "Up", values: undefined },
+})
+if (simulated) {
+  console.log(`Estimated min resource fee: ${minResourceFee}`)
+} else {
+  console.error("Simulation failed:", error)
+}
+```
+
+## Error reference
+
+| Exception                  | Contract code | Meaning                          |
+|----------------------------|---------------|----------------------------------|
+| `InsufficientBalanceError` | 9             | Not enough vXLM to place bet     |
+| `NoActiveRoundError`       | 7             | No round is currently active     |
+| `ContractPausedError`      | 22            | Contract paused for maintenance  |
+| `AlreadyBetError`          | 10            | User already bet in this round   |
+| `StakeExceedsMaxError`     | 28            | Bet exceeds the max stake cap    |
+| `ExposureCapExceededError` | 29            | User exposure exceeds round cap  |
+| `NoRoundTemplateError`     | 65            | No round template configured     |
+
+All typed exceptions extend `XelmaError` (which extends `Error`), so you
+can catch specific types or the base class.

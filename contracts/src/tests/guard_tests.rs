@@ -7,7 +7,7 @@
 
 use crate::contract::{VirtualTokenContract, VirtualTokenContractClient};
 use crate::errors::ContractError;
-use crate::types::{DataKey, OraclePayload, Round};
+use crate::types::{DataKeyCore, DataKeyScoped, OraclePayload, Round};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Env,
@@ -26,6 +26,7 @@ fn test_guard_success_path_no_active_round() {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Pre-condition: no active round
     assert!(client.get_active_round().is_none());
@@ -58,6 +59,7 @@ fn test_guard_passes_after_round_resolved() {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     client.create_round(&1_0000000u128, &None);
     let round = client.get_active_round().unwrap();
@@ -72,7 +74,8 @@ fn test_guard_passes_after_round_resolved() {
         nonce: 1u64,
         network_id: env.ledger().network_id(),
         contract_addr: contract_id.clone(),
-    });
+        confidence: None,
+        attestation: None,    });
 
     assert!(client.get_active_round().is_none());
 
@@ -96,6 +99,7 @@ fn test_guard_failure_path_active_round_exists() {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     // Create first round
     let start_price: u128 = 1_5000000;
@@ -105,7 +109,7 @@ fn test_guard_failure_path_active_round_exists() {
     let existing_round: Round = env.as_contract(&contract_id, || {
         env.storage()
             .persistent()
-            .get(&DataKey::ActiveRound)
+            .get(&DataKeyCore::ActiveRound)
             .unwrap()
     });
     let last_round_id_before = client.get_last_round_id();
@@ -120,7 +124,7 @@ fn test_guard_failure_path_active_round_exists() {
     let round_after: Round = env.as_contract(&contract_id, || {
         env.storage()
             .persistent()
-            .get(&DataKey::ActiveRound)
+            .get(&DataKeyCore::ActiveRound)
             .unwrap()
     });
     assert_eq!(round_after.round_id, existing_round.round_id);
@@ -144,6 +148,7 @@ fn test_guard_repeated_rejections_do_not_corrupt_state() {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     client.initialize(&admin, &oracle);
+    client.update_oracle_heartbeat(&0u32);
 
     client.create_round(&1_0000000u128, &None);
     let original_round = client.get_active_round().unwrap();

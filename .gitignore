@@ -6,6 +6,7 @@ target/
 # Rust Test Artifacts
 contracts/test_snapshots/
 contracts/proptest-regressions/
+adversarial-reports/
 
 # Soroban
 .soroban/

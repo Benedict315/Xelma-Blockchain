@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "round_id": 1001,
+  "mode": "updown",
+  "terminal": "resolve",
+  "price_start": 10000000,
+  "final_price": 15000000,
+  "pool_up": 300,
+  "pool_down": 150,
+  "fee_bps": null,
+  "min_participants": null,
+  "participant_count": 3,
+  "oracle": {
+    "price": 15000000,
+    "timestamp": 1700000000,
+    "round_id": 1001,
+    "nonce": 1
+  },
+  "participants": [
+    {
+      "index": 0,
+      "amount": 100,
+      "side_up": true,
+      "revealed": true,
+      "predicted_price": 0
+    },
+    {
+      "index": 1,
+      "amount": 200,
+      "side_up": true,
+      "revealed": true,
+      "predicted_price": 0
+    },
+    {
+      "index": 2,
+      "amount": 150,
+      "side_up": false,
+      "revealed": true,
+      "predicted_price": 0
+    }
+  ],
+  "expected": {
+    "archive_status": "resolved",
+    "total_fee": 0,
+    "payouts": [
+      { "index": 0, "payout": 150, "outcome": "win" },
+      { "index": 1, "payout": 300, "outcome": "win" },
+      { "index": 2, "payout": 0, "outcome": "loss" }
+    ]
+  }
+}

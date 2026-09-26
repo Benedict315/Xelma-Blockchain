@@ -27,10 +27,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Build contract (required for parity check)
-        run: cargo build --target wasm32-unknown-unknown --release --package xelma-contract
+        run: cargo rustc --manifest-path=contracts/Cargo.toml --crate-type=cdylib --target=wasm32v1-none --release
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

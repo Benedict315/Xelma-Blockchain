@@ -1,0 +1,65 @@
+name: Nightly Adversarial Suite
+
+on:
+  schedule:
+    # 03:00 UTC daily
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-adversarial-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  adversarial-suite:
+    name: Adversarial Simulation Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-adversarial-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-adversarial-
+            ${{ runner.os }}-cargo-
+
+      - name: Run full adversarial suite with report generation
+        run: |
+          chmod +x scripts/run_adversarial_suite.sh
+          ./scripts/run_adversarial_suite.sh
+
+      - name: Upload adversarial reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-reports
+          path: adversarial-reports/
+          retention-days: 30
+
+      - name: Post summary
+        if: always()
+        run: |
+          if [ -f adversarial-reports/adversarial-report.md ]; then
+            echo "## Adversarial Suite Report" >> "$GITHUB_STEP_SUMMARY"
+            cat adversarial-reports/adversarial-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi

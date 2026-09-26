@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "round_id": 1003,
+  "mode": "precision",
+  "terminal": "fallback_refund",
+  "price_start": 20000000,
+  "final_price": 21000000,
+  "pool_up": 0,
+  "pool_down": 0,
+  "fee_bps": null,
+  "min_participants": 3,
+  "participant_count": 2,
+  "oracle": {
+    "price": 21000000,
+    "timestamp": 1700000200,
+    "round_id": 1003,
+    "nonce": 1
+  },
+  "participants": [
+    {
+      "index": 0,
+      "amount": 80,
+      "revealed": true,
+      "predicted_price": 20500000
+    },
+    {
+      "index": 1,
+      "amount": 120,
+      "revealed": false,
+      "predicted_price": 0
+    }
+  ],
+  "expected": {
+    "archive_status": "fallback_refund",
+    "total_fee": 0,
+    "payouts": [
+      { "index": 0, "payout": 80, "outcome": "refund" },
+      { "index": 1, "payout": 120, "outcome": "refund" }
+    ]
+  }
+}

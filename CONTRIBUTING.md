@@ -8,6 +8,40 @@ Thanks for improving Xelma. This document explains the expected workflow for con
 - Keep changes focused and easy to review.
 - For contract changes, include or update tests.
 
+## Label Guidance
+
+Apply labels to help maintainers triage and prioritize your issue or PR.
+All templates include a label guidance block; use it to select the right labels.
+
+### Required base labels (choose one per issue type)
+
+| Issue type | Base label(s) |
+|---|---|
+| Bug report | `bug` |
+| Feature request | `enhancement` |
+| Protocol improvement | `protocol`, `enhancement` |
+| Security hardening | `security` |
+| Test task | `testing` |
+
+### Domain labels (add as applicable)
+
+| Label | When to apply |
+|---|---|
+| `blockchain` | Blockchain-related improvement |
+| `contract` | Changes to the smart contract (`contracts/`) |
+| `Rust` | Rust-specific implementation work |
+| `Stellar Wave` | Eligible for the Stellar Wave program |
+
+### Priority labels (add one when you can assess urgency)
+
+| Label | Criteria |
+|---|---|
+| `priority: high` | Security critical, funds at risk, CI blocked, or mainnet-blocking |
+| `priority: medium` | Correctness impact, user-facing regression, or release-blocking |
+| `priority: low` | Nice-to-have, defense-in-depth, docs, or cleanup |
+
+If you're unsure about labels, leave them for maintainers to apply during triage.
+
 ## Filing Issues
 
 Blank issues are disabled. Pick the template that matches your work so every
@@ -162,8 +196,46 @@ cargo llvm-cov --all-features --workspace --html --output-dir coverage-report --
 # Open coverage-report/html/index.html in a browser
 ```
 
-CI enforces a 90% line-coverage threshold on `contracts/src/contract.rs` and
-80% overall workspace coverage.
+CI enforces:
+
+- 90% line coverage on critical implementation modules
+  (`contracts/src/betting.rs`, `contracts/src/settlement.rs`)
+- 80% overall workspace line coverage
+
+`contracts/src/contract.rs` is largely a thin facade; its line coverage is
+reported in CI for visibility but is not the hard gate (attribution lands in
+the modules above).
+
+## E2E Smoke Test (local Soroban RPC)
+
+Unit tests under `contracts/src/tests/` run entirely in-process via
+`soroban_sdk::testutils` and never touch a real RPC, transaction signing, or
+wasm-validation path. `scripts/e2e_smoke.sh` closes that gap: it deploys the
+actual compiled WASM to a real local Soroban network and drives one full
+round through `initialize -> mint_initial -> create_round -> place_bet ->
+resolve_round -> claim_winnings`, asserting balances and on-chain events.
+This is also what CI's `e2e-smoke` job runs against the WASM built in the
+same run.
+
+**Prerequisites:** [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli)
+(>=22, with `stellar container` support), Docker (running), `jq`.
+
+```bash
+# Build the contract, then run the smoke test against it
+stellar contract build --package xelma-contract
+./scripts/e2e_smoke.sh
+```
+
+The script manages its own local network container (start on entry, stop on
+exit) and prints recent container logs automatically on failure. Useful
+environment variables:
+
+- `WASM_PATH` — path to the WASM to deploy (default:
+  `target/wasm32v1-none/release/xelma_contract.wasm`; built automatically if
+  missing).
+- `SKIP_NETWORK_START=1` — reuse an already-running `local` network container
+  instead of starting/stopping one (handy when iterating).
+- `KEEP_NETWORK=1` — leave the container running after the script exits.
 
 ## Canonical Contract Crate
 
