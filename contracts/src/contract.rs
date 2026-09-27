@@ -5,9 +5,7 @@
 
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, Vec};
 
-use crate::access_control;
 use crate::errors::ContractError;
-use crate::settlement::{archive_round, cancel_round, resolve_round, DEFAULT_ARCHIVE_RETENTION};
 use crate::types::{
     ArchivedRoundSummary, AccessState, BetSide, ConfigChangeKind, ConfigChangePayload, DataKeyCore,
     DataKeyScoped, DeviationReferenceMode, LeaderboardEntry, MultiFeedPayload, OneSidedPolicy,
@@ -18,15 +16,8 @@ use crate::types::{
     SeasonArchive, SeasonLeaderboardEntry, SimulationResult, UserPosition,
     UserRoundOutcome, UserStats, FeeModel, GovAction, GovProposal,
 };
-
-use crate::common::{
-    CONFIG_TIMELOCK_LEDGERS, CURRENT_SCHEMA_VERSION, DEFAULT_ARCHIVE_RETENTION,
-    DEFAULT_BET_WINDOW_LEDGERS, DEFAULT_MAX_PRECISION_PARTICIPANTS, DEFAULT_ORACLE_STALE_THRESHOLD,
-    DEFAULT_RUN_WINDOW_LEDGERS, MAX_ARCHIVE_RETENTION, MAX_BET_WINDOW_LEDGERS, MAX_MIN_PARTICIPANTS,
-    MAX_ORACLE_DEVIATION_BPS, MAX_ORACLE_STALE_THRESHOLD, MAX_PAGE_SIZE,
-    MAX_PRECISION_PARTICIPANTS_LIMIT, MAX_PROTOCOL_FEE_BPS, MAX_RUN_WINDOW_LEDGERS,
-    MAX_START_PRICE, MIN_ARCHIVE_RETENTION, MIN_CAP_VALUE, MIN_ORACLE_STALE_THRESHOLD,
-    MIN_START_PRICE, TTL_BUMP_AMOUNT, TTL_BUMP_THRESHOLD, BPS_DENOMINATOR,
+use crate::{
+    access_control, admin, betting, config, governance, insurance, leaderboard, queries, settlement,
 };
 
 // ─── Economic control limits ─────────────────────────────────────────────────
@@ -86,6 +77,7 @@ const MIN_ARCHIVE_RETENTION: u32 = 1;
 const MAX_ARCHIVE_RETENTION: u32 = 10_000;
 /// Ledgers to wait before a scheduled critical config change may be applied (~2 hours).
 const CONFIG_TIMELOCK_LEDGERS: u32 = 1440;
+const MIN_ROTATION_DELAY_SECONDS: u64 = 3_600;
 
 #[contract]
 pub struct VirtualTokenContract;
@@ -912,24 +904,6 @@ impl VirtualTokenContract {
         config::set_max_precision_participants(env, max)
     }
 
-    /// Resolves the round with oracle payload (oracle only)
-    /// Mode 0 (Up/Down): Winners split losers' pool proportionally; ties get refunds
-    /// Mode 1 (Precision/Legends): Closest guess wins full pot; ties split evenly
-    pub fn resolve_round(env: Env, payload: OraclePayload) -> Result<(), ContractError> {
-        resolve_round(
-            &env,
-            payload,
-            |e| Self::_require_supported_schema(e).map(|_| ()),
-            |e| e.storage().persistent().get(&DataKey::Oracle),
-            Self::_ensure_not_paused,
-            Self::_extend_persistent_ttl,
-            |e, r, s, p, c| archive_round(e, r, s, p, c, DEFAULT_ARCHIVE_RETENTION),
-            Self::_refund_under_threshold,
-            Self::_resolve_updown_mode,
-            Self::_resolve_precision_mode,
-        )
-    }
-
     /// Returns the configured round template, if any.
     pub fn get_round_template(env: Env) -> Option<RoundTemplate> {
         config::get_round_template(env)
@@ -1051,29 +1025,6 @@ impl VirtualTokenContract {
         config::set_dispute_ledgers(env, ledgers)
     }
 
-    // ─── Lifecycle resilience (Issue #111) ──────────────────────────────────
-
-    /// Cancels the active round and deterministically refunds all participant stakes.
-    ///
-    /// Only admin may cancel. Intended for oracle-unavailable or emergency recovery
-    /// scenarios. After cancellation:
-    ///  - All participant stakes are moved to their pending winnings.
-    ///  - The active round is removed; no future settlement is possible.
-    ///  - The round ID is marked cancelled to prevent any replay.
-    pub fn cancel_round(env: Env, reason: u32) -> Result<(), ContractError> {
-        cancel_round(
-            &env,
-            reason,
-            |e| e.storage().persistent().get(&DataKey::Admin),
-            |e| Self::_require_supported_schema(e).map(|_| ()),
-            Self::_accumulate_pending,
-            |e, rid, rm, u, ps, pp, s, p, o| {
-                Self::_persist_user_outcome(e, rid, rm, u, ps, pp, s, p, o)
-            },
-            |e, r, s, p, c| archive_round(e, r, s, p, c, DEFAULT_ARCHIVE_RETENTION),
-        )
-    }
-
     pub fn get_archived_round(env: Env, round_id: u64) -> Option<ArchivedRoundSummary> {
         queries::get_archived_round(env, round_id)
     }
@@ -1129,42 +1080,6 @@ impl VirtualTokenContract {
     ) -> Vec<(Address, UserPosition)> {
         queries::get_updown_positions_page(env, offset, limit)
 
-    }
-
-    /// Persists a compact round summary and enforces FIFO archive retention.
-    fn _archive_round(
-        env: &Env,
-        round: &Round,
-        status: RoundArchiveStatus,
-        final_price: u128,
-        participant_count: u32,
-    ) {
-        archive_round(env, round, status, final_price, participant_count, DEFAULT_ARCHIVE_RETENTION)
-    }
-
-    fn _persist_user_outcome(
-        env: &Env,
-        round_id: u64,
-        round_mode: u32,
-        user: &Address,
-        prediction_side: u32,
-        predicted_price: u128,
-        stake: i128,
-        payout: i128,
-        outcome: UserOutcomeType,
-    ) {
-        crate::settlement::persist_user_outcome(
-            env,
-            round_id,
-            round_mode,
-            user,
-            prediction_side,
-            predicted_price,
-            stake,
-            payout,
-            outcome,
-            Self::_extend_persistent_ttl,
-        )
     }
 
     /// Returns the configured insurance coverage payout rate.
