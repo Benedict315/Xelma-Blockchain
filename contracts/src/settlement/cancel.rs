@@ -192,9 +192,9 @@ pub fn void_round(env: Env, round_id: u64) -> Result<(), ContractError> {
     _ensure_not_paused(&env)?;
 
     let pending =
-        _read_pending_dispute(&env, round_id).ok_or(ContractError::RoundNotCancellable)?;
+        _read_pending_dispute(&env, round_id).ok_or(ContractError::DisputeWindowExpired)?;
     if env.ledger().sequence() >= pending.deadline_ledger {
-        return Err(ContractError::RoundNotCancellable);
+        return Err(ContractError::DisputeWindowExpired);
     }
 
     let participants: Vec<Address> = env
@@ -296,7 +296,7 @@ pub fn finalize_round(env: Env, round_id: u64) -> Result<(), ContractError> {
 
     let pending = _read_pending_dispute(&env, round_id).ok_or(ContractError::NoActiveRound)?;
     if env.ledger().sequence() < pending.deadline_ledger {
-        return Err(ContractError::RoundNotEnded);
+        return Err(ContractError::ClaimLocked);
     }
 
     let (fee_amount, participant_count) = super::resolve::_complete_settlement(

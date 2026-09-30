@@ -5,7 +5,10 @@
 
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, Vec};
 
+use crate::access_control;
 use crate::errors::ContractError;
+use crate::governance;
+use crate::insurance;
 use crate::types::{
     ArchivedRoundSummary, AccessState, BetSide, ConfigChangeKind, ConfigChangePayload, DataKeyCore,
     DataKeyScoped, DeviationReferenceMode, LeaderboardEntry, MultiFeedPayload, OneSidedPolicy,
@@ -16,68 +19,37 @@ use crate::types::{
     SeasonArchive, SeasonLeaderboardEntry, SimulationResult, UserPosition,
     UserRoundOutcome, UserStats, FeeModel, GovAction, GovProposal,
 };
-use crate::{
-    access_control, admin, betting, config, governance, insurance, leaderboard, queries, settlement,
+
+use crate::common::{
+    CONFIG_TIMELOCK_LEDGERS, CURRENT_SCHEMA_VERSION, DEFAULT_ARCHIVE_RETENTION,
+    DEFAULT_BET_WINDOW_LEDGERS, DEFAULT_MAX_PRECISION_PARTICIPANTS, DEFAULT_ORACLE_STALE_THRESHOLD,
+    DEFAULT_RUN_WINDOW_LEDGERS, MAX_ARCHIVE_RETENTION, MAX_BET_WINDOW_LEDGERS, MAX_MIN_PARTICIPANTS,
+    MAX_ORACLE_DEVIATION_BPS, MAX_ORACLE_STALE_THRESHOLD, MAX_PAGE_SIZE,
+    MAX_PRECISION_PARTICIPANTS_LIMIT, MAX_PROTOCOL_FEE_BPS, MAX_RUN_WINDOW_LEDGERS,
+    MAX_START_PRICE, MIN_ARCHIVE_RETENTION, MIN_CAP_VALUE, MIN_ORACLE_STALE_THRESHOLD,
+    MIN_START_PRICE, TTL_BUMP_AMOUNT, TTL_BUMP_THRESHOLD, BPS_DENOMINATOR,
 };
 
-// ─── Economic control limits ─────────────────────────────────────────────────
-/// Minimum allowed value when setting an economic cap to prevent zero-value lockouts.
-const MIN_CAP_VALUE: i128 = 1;
-/// Upper bound on the minimum-participants config to prevent unbounded gas in resolution.
-const MAX_MIN_PARTICIPANTS: u32 = 10_000;
-const DEFAULT_MAX_PRECISION_PARTICIPANTS: u32 = 1_000;
-const MAX_PRECISION_PARTICIPANTS_LIMIT: u32 = 10_000;
-/// Maximum number of entries returned per page by paginated query methods,
-/// regardless of the caller-requested `limit` (Issue #139).
-const MAX_PAGE_SIZE: u32 = 100;
+// ─── Oracle rotation expiry ───────────────────────────────────────────────────
+const MIN_ROTATION_EXPIRY_SECONDS: u64 = 60; // 1 minute minimum
+/// Minimum delay between proposing and accepting an oracle rotation.
+/// Prevents quiet takeovers: even with admin key compromise, a 1-hour window
+/// gives operators and monitoring dashboards time to react.
+const MIN_ROTATION_DELAY_SECONDS: u64 = 3_600; // 1 hour
 
-// ─── Oracle heartbeat limits ──────────────────────────────────────────────────
-const DEFAULT_ORACLE_STALE_THRESHOLD: u64 = 3_600; // 1 hour
-const MIN_ORACLE_STALE_THRESHOLD: u64 = 60; // 1 minute
-const MAX_ORACLE_STALE_THRESHOLD: u64 = 86_400; // 24 hours
+const ROUND_MODE_UPDOWN: u32 = 0;
+const ROUND_MODE_PRECISION: u32 = 1;
+const PAYOUT_OUTCOME_LOSS: u32 = 0;
+const PAYOUT_OUTCOME_WIN: u32 = 1;
+const PAYOUT_OUTCOME_REFUND: u32 = 2;
 
-const DEFAULT_BET_WINDOW_LEDGERS: u32 = 6;
-const DEFAULT_RUN_WINDOW_LEDGERS: u32 = 12;
-const MAX_BET_WINDOW_LEDGERS: u32 = 1_440;
-const MAX_RUN_WINDOW_LEDGERS: u32 = 2_880;
-
-// ─── Oracle deviation guardrails ─────────────────────────────────────────────
-/// Maximum allowed basis points for oracle deviation is bounded to avoid absurd configs.
-/// 100_000 bp = 1000% deviation (effectively "off", but still explicit).
-const MAX_ORACLE_DEVIATION_BPS: u32 = 100_000;
-
-// ─── Protocol fee (Issue #162) ────────────────────────────────────────────────
-/// Hard cap on the optional protocol settlement fee, in basis points
-/// (1 bp = 0.01%). 1_000 bp = 10% of the round's total pot — the maximum an
-/// admin may ever schedule via timelock. Larger values would risk turning
-/// the protocol into a de-facto extraction mechanism and are explicitly
-/// disallowed to preserve user trust and the conservation invariant.
-const MAX_PROTOCOL_FEE_BPS: u32 = 1_000;
-/// Denominator for bps math: `fee = total_pot * bps / BPS_DENOMINATOR`.
-/// Pinned to 10_000 to match the universal "1 bp = 0.01%" convention.
-const BPS_DENOMINATOR: i128 = 10_000;
-
-// ─── Storage schema versioning ───────────────────────────────────────────────
-const CURRENT_SCHEMA_VERSION: u32 = 3;
-// ─── Start-price bounds (Issue #119) ─────────────────────────────────────────
-/// Minimum start price in protocol units — prevents zero-value and dust rounds.
-const MIN_START_PRICE: u128 = 1;
-/// Maximum start price in protocol units — guards against overflow in payout math.
-const MAX_START_PRICE: u128 = 1_000_000_000_000_000_000;
-// ─── Storage TTL Lifecycle Limits (Issue #142) ──────────────────────────────
-/// Minimum remaining ledgers before a persistent entry is extended.
-const TTL_BUMP_THRESHOLD: u32 = 17_280; // ~1 day at 5-second ledgers
-/// Amount of ledgers to extend a persistent entry to when below threshold.
-const TTL_BUMP_AMOUNT: u32 = 518_400; // ~30 days at 5-second ledgers
-
-
-/// Minimum archive retention limit — prevents accidental pruning of all history.
-const MIN_ARCHIVE_RETENTION: u32 = 1;
-/// Maximum archive retention limit — prevents unbounded storage growth.
-const MAX_ARCHIVE_RETENTION: u32 = 10_000;
-/// Ledgers to wait before a scheduled critical config change may be applied (~2 hours).
-const CONFIG_TIMELOCK_LEDGERS: u32 = 1440;
-const MIN_ROTATION_DELAY_SECONDS: u64 = 3_600;
+use crate::admin;
+use crate::betting;
+use crate::common;
+use crate::config;
+use crate::leaderboard;
+use crate::queries;
+use crate::settlement;
 
 #[contract]
 pub struct VirtualTokenContract;
@@ -904,6 +876,130 @@ impl VirtualTokenContract {
         config::set_max_precision_participants(env, max)
     }
 
+    pub fn get_max_precision_participants(env: Env) -> u32 {
+        config::get_max_precision_participants(env)
+    }
+
+    pub fn set_precision_payout_policy(env: Env, policy: u32) -> Result<(), ContractError> {
+        config::set_precision_payout_policy(env, policy)
+    }
+
+    pub fn get_precision_payout_policy(env: Env) -> u32 {
+        config::get_precision_payout_policy(env)
+    }
+
+    pub fn set_mint_limit(env: Env, limit: u32) -> Result<(), ContractError> {
+        config::set_mint_limit(env, limit)
+    }
+
+    pub fn get_mint_limit(env: Env) -> u32 {
+        config::get_mint_limit(env)
+    }
+
+    pub fn set_epoch_mint_budget(env: Env, budget: i128) -> Result<(), ContractError> {
+        config::set_epoch_mint_budget(env, budget)
+    }
+
+    pub fn get_epoch_mint_budget(env: Env) -> i128 {
+        config::get_epoch_mint_budget(env)
+    }
+
+    pub fn set_archive_retention(env: Env, limit: u32) -> Result<(), ContractError> {
+        config::set_archive_retention(env, limit)
+    }
+
+    pub fn get_archive_retention(env: Env) -> u32 {
+        config::get_archive_retention(env)
+    }
+
+    pub fn set_pending_winnings_expiry(env: Env, ledgers: u32) -> Result<(), ContractError> {
+        config::set_pending_winnings_expiry(env, ledgers)
+    }
+
+    pub fn schedule_pending_winnings_expiry(env: Env, ledgers: u32) -> Result<(), ContractError> {
+        config::schedule_pending_winnings_expiry(env, ledgers)
+    }
+
+    pub fn get_pending_winnings_expiry(env: Env) -> u32 {
+        config::get_pending_winnings_expiry(env)
+    }
+
+    pub fn reclaim_expired_pending_winnings(
+        env: Env,
+        user: Address,
+    ) -> Result<i128, ContractError> {
+        admin::reclaim_expired_pending_winnings(env, user)
+    }
+
+    pub fn set_close_buffer_ledgers(env: Env, buffer_ledgers: u32) -> Result<(), ContractError> {
+        config::set_close_buffer_ledgers(env, buffer_ledgers)
+    }
+
+    /// Sets the multi-feed oracle quorum configuration (admin only).
+    ///
+    /// When `Some(config)`, `resolve_round_multi` is enabled. When `None`,
+    /// multi-feed resolution is disabled. The legacy path is unaffected.
+    pub fn set_oracle_quorum_config(
+        env: Env,
+        config: Option<OracleQuorumConfig>,
+    ) -> Result<(), ContractError> {
+        admin::set_oracle_quorum_config(env, config)
+    }
+
+    /// Returns the configured multi-feed oracle quorum config, if any.
+    pub fn get_oracle_quorum_config(env: Env) -> Option<OracleQuorumConfig> {
+        admin::get_oracle_quorum_config(env)
+    }
+
+    pub fn get_close_buffer_ledgers(env: Env) -> u32 {
+        config::get_close_buffer_ledgers(env)
+    }
+
+    /// Returns the configured betting-window length in ledgers.
+    pub fn get_bet_window_ledgers(env: Env) -> u32 {
+        config::get_bet_window_ledgers(env)
+    }
+
+    /// Returns the configured run-window length in ledgers.
+    pub fn get_run_window_ledgers(env: Env) -> u32 {
+        config::get_run_window_ledgers(env)
+    }
+
+    /// Sets the early cash-out penalty rate in basis points (admin only).
+    /// `None` disables early cash-out entirely (default).
+    /// `Some(bps)` enables it with the given penalty rate (1–1000 bps).
+    pub fn set_early_cashout_bps(env: Env, bps: Option<u32>) -> Result<(), ContractError> {
+        config::set_early_cashout_bps(env, bps)
+    }
+
+    /// Returns the configured early cash-out penalty bps, if enabled.
+    pub fn get_early_cashout_bps(env: Env) -> Option<u32> {
+        config::get_early_cashout_bps(env)
+    }
+
+    /// Creates a new prediction round (admin only)
+    pub fn create_round(
+        env: Env,
+        start_price: u128,
+        mode: Option<u32>,
+    ) -> Result<(), ContractError> {
+        betting::create_round(env, start_price, mode)
+    }
+
+    /// Stores the admin's blueprint for `create_next_from_template` (admin only).
+    pub fn set_round_template(
+        env: Env,
+        start_price: u128,
+        mode: Option<u32>,
+    ) -> Result<(), ContractError> {
+        config::set_round_template(env, start_price, mode)
+    }
+
+    /// Removes the configured round template (admin only).
+    pub fn clear_round_template(env: Env) -> Result<(), ContractError> {
+        config::clear_round_template(env)
+    }
+
     /// Returns the configured round template, if any.
     pub fn get_round_template(env: Env) -> Option<RoundTemplate> {
         config::get_round_template(env)
@@ -1025,6 +1121,54 @@ impl VirtualTokenContract {
         config::set_dispute_ledgers(env, ledgers)
     }
 
+    pub fn get_dispute_ledgers(env: Env) -> u32 {
+        config::get_dispute_ledgers(&env)
+    }
+
+    /// Anyone may call `void_round` during the dispute window to refund all
+    /// participants their full stakes (void-to-refund path).
+    pub fn void_round(env: Env, round_id: u64) -> Result<(), ContractError> {
+        settlement::void_round(env, round_id)
+    }
+
+    /// Anyone may call `finalize_round` after the dispute window expires to
+    /// distribute winnings to winners (normal settlement outcome).
+    pub fn finalize_round(env: Env, round_id: u64) -> Result<(), ContractError> {
+        settlement::finalize_round(env, round_id)
+    }
+
+    pub fn get_active_round(env: Env) -> Option<Round> {
+        queries::get_active_round(env)
+    }
+
+    pub fn get_one_sided_policy(env: Env) -> OneSidedPolicy {
+        let active_round: Option<Round> = env.storage().persistent().get(&DataKeyCore::ActiveRound);
+        if let Some(round) = active_round {
+            settlement::_select_one_sided_policy(&round)
+        } else {
+            OneSidedPolicy::Refund
+        }
+    }
+
+    pub fn get_round_pool_stats(env: Env) -> Option<RoundPoolStats> {
+        queries::get_round_pool_stats(env)
+    }
+
+    pub fn get_round_phase(env: Env) -> Result<RoundPhase, ContractError> {
+        queries::get_round_phase(env)
+    }
+
+    /// Returns a single-read composite snapshot of current market state:
+    /// round phase, pool composition, timing buffers, and fee configuration.
+    /// See `MarketSnapshot` for empty-round semantics.
+    pub fn get_market_snapshot(env: Env) -> MarketSnapshot {
+        queries::get_market_snapshot(env)
+    }
+
+    pub fn get_last_round_id(env: Env) -> u64 {
+        queries::get_last_round_id(env)
+    }
+
     pub fn get_archived_round(env: Env, round_id: u64) -> Option<ArchivedRoundSummary> {
         queries::get_archived_round(env, round_id)
     }
@@ -1080,6 +1224,50 @@ impl VirtualTokenContract {
     ) -> Vec<(Address, UserPosition)> {
         queries::get_updown_positions_page(env, offset, limit)
 
+    }
+
+    /// Returns user's vXLM balance
+    pub fn balance(env: Env, user: Address) -> i128 {
+        common::balance(env, user)
+    }
+
+    /// Estimates payouts for the active round given a hypothetical final price.
+    /// Does not mutate storage. Returns SimulationResult.
+    pub fn simulate_payout(env: Env, final_price: u128) -> Result<SimulationResult, ContractError> {
+        queries::simulate_payout(env, final_price)
+    }
+
+    // ─── Fee incidence model (Issue #268) ──────────────────────────────────
+
+    /// Sets the fee incidence model (admin only).
+    ///
+    /// `FeeOnPot` (0): fee is calculated on the total round pot (default).
+    /// `FeeOnWinnings` (1): fee is calculated only on net winnings / profit.
+    pub fn set_fee_model(env: Env, model: FeeModel) -> Result<(), ContractError> {
+        config::set_fee_model(env, model)
+    }
+
+    /// Returns the configured fee incidence model, defaulting to `FeeOnPot`.
+    pub fn get_fee_model(env: Env) -> FeeModel {
+        config::get_fee_model(env)
+    }
+
+    // ─── Insurance / backstop fund (Issue #367) ────────────────────────────
+
+    /// Sets the insurance accrual split: how many basis points of each
+    /// protocol fee are directed to the insurance fund (admin only).
+    pub fn set_insurance_split_bps(env: Env, bps: u32) -> Result<(), ContractError> {
+        insurance::set_insurance_split_bps(env, bps)
+    }
+
+    /// Returns the configured insurance split in basis points.
+    pub fn get_insurance_split_bps(env: Env) -> u32 {
+        insurance::get_insurance_split_bps(&env)
+    }
+
+    /// Sets the insurance coverage payout rate in basis points (admin only).
+    pub fn set_insurance_coverage_bps(env: Env, bps: u32) -> Result<(), ContractError> {
+        insurance::set_insurance_coverage_bps(env, bps)
     }
 
     /// Returns the configured insurance coverage payout rate.
